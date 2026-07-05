@@ -90,7 +90,9 @@ USER agent
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && rm -rf /home/agent/.rustup/tmp
 
-# Pre-seed minimal config to skip onboarding prompts
+# Pre-seed minimal config to skip onboarding prompts.
+# bypassPermissionsModeAccepted is safe HERE because the container is the sandbox;
+# do not copy this .claude.json onto the host / --local path (no sandbox there).
 RUN mkdir -p /home/agent/.local/bin /home/agent/.claude && \
     ln -s /usr/local/bin/claude /home/agent/.local/bin/claude && \
     echo '{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}' > /home/agent/.claude.json
