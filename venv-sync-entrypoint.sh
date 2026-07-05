@@ -69,4 +69,27 @@ else
     echo "[venv-sync] WARNING: No requirements.txt found at $KIT_REQ_FILE. Hooks requiring Python packages will fail."
 fi
 
+# --- Claude Code CLI auto-update (persistent, survives container restarts) ---
+# The image bakes a claude version at build time, but images go stale. When the
+# launcher mounts a persistent dir at ~/.claude-cli, keep a self-updating copy
+# there (npm prefix install, refreshed every MULTIPLAI_CLI_UPDATE_DAYS, default
+# weekly) and prefer it on PATH. No mount → baked version, no update attempts.
+CLI_DIR="$HOME/.claude-cli"
+if [ -d "$CLI_DIR" ]; then
+    UPDATE_DAYS="${MULTIPLAI_CLI_UPDATE_DAYS:-7}"
+    STAMP="$CLI_DIR/.last-update"
+    if [ ! -x "$CLI_DIR/bin/claude" ] || ! find "$STAMP" -mtime -"$UPDATE_DAYS" 2>/dev/null | grep -q .; then
+        echo "[entrypoint] Updating Claude Code CLI (every ${UPDATE_DAYS}d) ..."
+        if npm install -g --prefix "$CLI_DIR" @anthropic-ai/claude-code@latest >/dev/null 2>&1; then
+            date > "$STAMP"
+            echo "[entrypoint] Claude Code CLI: $("$CLI_DIR/bin/claude" --version 2>/dev/null || echo updated)"
+        else
+            echo "[entrypoint] CLI update failed (offline?) — using $(claude --version 2>/dev/null || echo 'baked version')"
+        fi
+    fi
+    if [ -x "$CLI_DIR/bin/claude" ]; then
+        export PATH="$CLI_DIR/bin:$PATH"
+    fi
+fi
+
 exec "$@"
