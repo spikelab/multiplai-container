@@ -20,4 +20,9 @@ set -euo pipefail
 
 HOST="${AB_HOST:-host.docker.internal}"
 
+if [ "$#" -eq 0 ]; then
+    echo "usage: ab <agent-browser-verb> [args]   e.g. ab snapshot -i | ab open https://..." >&2
+    exit 2
+fi
+
 exec ssh -q -o BatchMode=yes "$HOST" "agent-browser $(printf '%q ' "$@")"

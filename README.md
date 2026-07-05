@@ -37,19 +37,38 @@ do manually.
 ```bash
 git clone https://github.com/spikelab/multiplai-container
 cd multiplai-container
-cat > .env <<'ENV'
-WORKSPACE="$HOME/your-workspace"
-ENV
+cp .env.example .env          # then set WORKSPACE to your workspace path
 ./build.sh
+
+# Persist Claude auth across runs by mounting ~/.claude (otherwise you
+# re-authenticate every `docker run`).
 docker run -it --rm \
   -v "$HOME/your-workspace:$HOME/your-workspace" \
+  -v "$HOME/.claude:/home/agent/.claude" \
   -e WORKSPACE="$HOME/your-workspace" \
   claude-multiplai:local
 ```
 
-For the macOS host bridge, install `container-build-gateway.sh` on the Mac
-(instructions in the file header) and set `SSH_BUILD_USER`/`SSH_BUILD_KEY`
-in `.env`.
+The kit venv sync is skipped automatically in standalone mode (it only runs
+when `CLAUDE_MULTIPLAI_HOME` points at a multiplai-kit checkout).
+
+### macOS host bridge (optional)
+
+The bridge lets container skills run Mac-only tools (Xcode builds,
+mlx-whisper, driving Chrome via `ab`) over a key-restricted SSH gateway.
+
+```bash
+# On the Mac host:
+ssh-keygen -t ed25519 -f ~/.ssh/build_key -N ''      # container's key
+cp container-build-gateway.sh ~/.local/bin/ && chmod +x ~/.local/bin/container-build-gateway.sh
+# Prefix the PUBLIC key in ~/.ssh/authorized_keys with the forced command:
+#   restrict,command="~/.local/bin/container-build-gateway.sh" ssh-ed25519 AAAA... container-builds
+# Enable System Settings ▸ General ▸ Sharing ▸ Remote Login.
+```
+
+Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
+(`$HOME/.ssh/build_key`) in `.env`, and mount the key into the container:
+`-v "$HOME/.ssh/build_key:/home/agent/.ssh/build_key:ro"`.
 
 ## License
 

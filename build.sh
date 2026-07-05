@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KIT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PARENT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Look for .env: kit root first, then container dir (backward compat)
-if [ -f "$KIT_ROOT/.env" ]; then
+# Look for .env: the multiplai-kit root first (only if the parent actually IS
+# a kit checkout — don't source a stranger's .env just because the clone
+# happens to sit under a directory that has one), then this directory.
+if [ -f "$PARENT_DIR/.env" ] && [ -f "$PARENT_DIR/claude.sh" ] && [ -d "$PARENT_DIR/dotfiles" ]; then
     # shellcheck disable=SC1091
-    source "$KIT_ROOT/.env"
+    source "$PARENT_DIR/.env"
 elif [ -f "$SCRIPT_DIR/.env" ]; then
     # shellcheck disable=SC1091
     source "$SCRIPT_DIR/.env"
 else
     echo "Error: No .env file found."
-    echo "  cp .env.example .env   # in the kit root, then fill in your values"
+    echo "  cp .env.example .env   # next to this script, then fill in your values"
+    echo "  (or run from a multiplai-kit checkout, whose root .env is used)"
     exit 1
 fi
 
-# Expand ~ and $HOME in WORKSPACE
-WORKSPACE=$(eval echo "${WORKSPACE:-}")
+# Expand a leading ~ or $HOME in WORKSPACE without eval'ing .env content
+WORKSPACE="${WORKSPACE:-}"
+WORKSPACE="${WORKSPACE/#\~/$HOME}"
+WORKSPACE="${WORKSPACE/#\$HOME/$HOME}"
 
 : "${WORKSPACE:?WORKSPACE must be set in .env}"
 IMAGE_NAME="${IMAGE_NAME:-claude-multiplai:local}"

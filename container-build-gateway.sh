@@ -41,9 +41,12 @@ if [[ "$CMD$WORKDIR" == *[\;\|\&\<\>\`\$\(\)]* || "$CMD$WORKDIR" == *$'\n'* ]]; 
   deny "shell metacharacter in command"
 fi
 
-# Tokenize honoring quotes only. (z) splits like the shell parser but performs
-# NO command/parameter/glob expansion, and the metachars above are already gone.
-words=(${(z)CMD})
+# Tokenize honoring quotes only. (z) splits like the shell parser; (Q) then
+# strips one level of quoting from each word so a quoted argument arrives at
+# the target as its literal value (e.g. `ab type "hello world"` -> one word
+# `hello world`, not `hello\ world`). No command/parameter/glob expansion
+# happens, and the metachars above are already rejected.
+words=(${(Q)${(z)CMD}})
 (( ${#words} )) || deny "empty command"
 c1="${words[1]}"; c2="${words[2]}"
 
@@ -65,16 +68,48 @@ url_ok() {
 
 allow=0
 case "$c1" in
-  xcodebuild|xcsift|xcodegen|pkill|agent-browser|mlx-whisper|mlx_whisper) allow=1 ;;
+  xcodebuild|xcsift|xcodegen|agent-browser|mlx-whisper|mlx_whisper) allow=1 ;;
   swift)   [[ "$c2" == (build|run|test|package) ]] && allow=1 ;;
   xcrun)   [[ "$c2" == (simctl|xcresulttool|devicectl) ]] && allow=1 ;;
   command) [[ "$c2" == "-v" ]] && allow=1 ;;
   open)    [[ "$c2" == "-a" && "${words[3]}" == Simulator* ]] && allow=1 ;;
+  pkill)
+    # Only allow killing the simulator/build processes this gateway exists for,
+    # by exact name — never a bare `pkill -f .` that could reap host processes.
+    i=2; target=""
+    while (( i <= ${#words} )); do
+      w="${words[i]}"
+      case "$w" in
+        -f|-9|-15|-INT|-TERM|-KILL|-x) ;;               # accepted flags
+        -*) deny "pkill flag not allowed: $w" ;;
+        *) [[ -n "$target" ]] && deny "pkill: single target only"; target="$w" ;;
+      esac
+      (( i++ ))
+    done
+    case "$target" in
+      Simulator|com.apple.CoreSimulator.*|xcodebuild|swift|swift-frontend|XCTest|testmanagerd) allow=1 ;;
+      *) deny "pkill target not allowed: ${target:-<none>}" ;;
+    esac
+    ;;
   curl)
+    # Loopback-only URLs (checked below) plus a flag allowlist: reject any flag
+    # that could write/read host files or reach a non-URL transport
+    # (-o/-O/--output/-T/--upload-file/--data @file/-K/--config/--unix-socket).
     seen=0
     i=2
     while (( i <= ${#words} )); do
       u="${words[i]}"
+      case "$u" in
+        -o|-O|--output|--output-dir|--create-dirs|-T|--upload-file|\
+        -K|--config|--unix-socket|--abstract-unix-socket|-D|--dump-header|\
+        --trace|--trace-ascii|--cookie-jar|-c)
+          deny "curl flag not allowed: $u" ;;
+        --data*|-d|--data-binary|--data-raw|--data-urlencode)
+          # data may not reference a file (@) or be read from stdin (@-)
+          next="${words[i+1]:-}"
+          [[ "$u" == *=@* || "$next" == @* ]] && deny "curl @file data not allowed"
+          ;;
+      esac
       url_ok "$u" || deny "curl target not allowed: $u"
       [[ "$u" == *://* ]] && seen=1
       (( i++ ))

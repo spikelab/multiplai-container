@@ -1,10 +1,19 @@
-FROM ubuntu:24.04
+# Pinned by digest for reproducible builds. To bump:
+#   curl -s https://hub.docker.com/v2/repositories/library/ubuntu/tags/24.04 | jq -r .digest
+FROM ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
 
 # --- Build args for portability ---
 ARG HOST_UID=501
 ARG HOST_GID=20
 ARG WORKSPACE=/workspace
 ARG SSH_BUILD_USER=agent
+
+# --- Tool versions (bump to update; each is referenced by its install step,
+#     so changing one busts exactly that layer's cache) ---
+ARG CLAUDE_VERSION=2.1.201
+ARG UV_VERSION=0.11.26
+ARG BUN_VERSION=1.3.14
+ARG RUST_TOOLCHAIN=1.96.1
 
 # --- All apt packages in one layer, single cache cleanup ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -37,41 +46,64 @@ RUN ARCH=$(dpkg --print-architecture) \
         "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${CSP_VERSION}/cloud-sql-proxy.linux.${ARCH}" \
     && chmod +x /usr/local/bin/cloud-sql-proxy
 
-# Node.js 22 + GitHub CLI (share one apt-get update/cleanup cycle)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+# Node.js 22 + GitHub CLI (share one apt-get update/cleanup cycle).
+# Nodesource repo is configured via apt keyring directly (no setup_22.x
+# curl|bash); gnupg is needed once for --dearmor and removed afterwards.
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg \
+    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /usr/share/keyrings/nodesource.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y nodejs gh \
+    && apt-get purge -y gnupg && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# uv (Python package manager)
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
+# uv (Python package manager) — version-pinned installer
+RUN curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh \
     && cp /root/.local/bin/uv /usr/local/bin/uv \
     && cp /root/.local/bin/uvx /usr/local/bin/uvx \
     && rm -rf /root/.local
 
-# Bun (copy binary, clean installer artifacts)
-RUN curl -fsSL https://bun.sh/install | bash \
+# Bun (version-pinned; copy binary, clean installer artifacts)
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
     && cp /root/.bun/bin/bun /usr/local/bin/bun \
     && cp /root/.bun/bin/bunx /usr/local/bin/bunx \
     && rm -rf /root/.bun
 
-# Vite + ccusage + LSP servers globally, clean npm cache
-RUN npm install -g vite ccusage@17 @usebruno/cli pyright typescript-language-server typescript && npm cache clean --force
+# Vite + ccusage + LSP servers globally (all version-pinned), clean npm cache
+RUN npm install -g vite@8.1.3 ccusage@20.0.14 @usebruno/cli@3.5.1 \
+        pyright@1.1.411 typescript-language-server@5.3.0 typescript@6.0.3 \
+    && npm cache clean --force
 
-# Claude Code (bump CLAUDE_VERSION to force update)
-# Installs to /root/.local/bin/ — copy to /usr/local/bin/ for agent user access
-ARG CLAUDE_VERSION=2.1.183
-RUN curl -fsSL https://claude.ai/install.sh | bash \
-    && cp /root/.local/bin/claude /usr/local/bin/claude 2>/dev/null \
-    || cp $(find /root -name claude -type f -perm +111 2>/dev/null | head -1) /usr/local/bin/claude
-RUN rm -rf /root/.local /root/.npm /root/.cache /tmp/*
+# Claude Code — install.sh takes the version as its argument, so CLAUDE_VERSION
+# both pins the installed CLI and busts this layer's cache when bumped.
+# Installs to /root/.local/bin/ — copy to /usr/local/bin/ for agent user access.
+# Cleanup lives in the same RUN: a separate `rm -rf` layer would leave the
+# files in the previous layer and shrink nothing.
+RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
+    && { cp /root/.local/bin/claude /usr/local/bin/claude 2>/dev/null \
+         || cp "$(find /root -name claude -type f -perm /111 2>/dev/null | head -1)" /usr/local/bin/claude; } \
+    && rm -rf /root/.local /root/.npm /root/.cache /tmp/*
 
-# Create agent user with matching host UID/GID
-RUN getent group ${HOST_GID} >/dev/null 2>&1 || groupadd -g ${HOST_GID} hostgroup \
-    && useradd -m -u ${HOST_UID} -g ${HOST_GID} agent 2>/dev/null || true
+# Create agent user with matching host UID/GID.
+# ubuntu:24.04 ships a built-in `ubuntu` user at UID 1000; if HOST_UID collides
+# with an existing user (the default on most Linux hosts), rename that user to
+# `agent` instead of creating one. No `|| true`: a real useradd/usermod failure
+# should fail the build here, not later at the first `USER agent` step.
+RUN set -e; \
+    getent group ${HOST_GID} >/dev/null || groupadd -g ${HOST_GID} hostgroup; \
+    existing="$(getent passwd ${HOST_UID} | cut -d: -f1 || true)"; \
+    if [ -n "$existing" ]; then \
+        usermod -l agent -d /home/agent -m "$existing"; \
+        usermod -g ${HOST_GID} agent; \
+    else \
+        useradd -m -u ${HOST_UID} -g ${HOST_GID} agent; \
+    fi; \
+    id agent
 
 # Pre-create .venv mount point with agent ownership.
 # Docker copies this ownership into new named volumes on first mount.
@@ -86,8 +118,9 @@ RUN chmod +x /usr/local/bin/venv-sync-entrypoint.sh
 
 USER agent
 
-# Rust toolchain (installed as agent user → ~/.cargo)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+# Rust toolchain (installed as agent user → ~/.cargo), version-pinned
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" \
     && rm -rf /home/agent/.rustup/tmp
 
 # Pre-seed minimal config to skip onboarding prompts.

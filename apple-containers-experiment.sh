@@ -52,19 +52,17 @@ mkdir -p "$REPORT_DIR"
 
 # ─── Utility functions ───────────────────────────────────────────────
 
-time_cmd() {
-    # Returns wall-clock seconds (to millisecond precision)
-    local start end
-    start=$(date +%s.%N 2>/dev/null || python3 -c 'import time; print(f"{time.time():.3f}")')
-    "$@"
-    end=$(date +%s.%N 2>/dev/null || python3 -c 'import time; print(f"{time.time():.3f}")')
-    python3 -c "print(f'{$end - $start:.3f}')"
-}
-
 record() {
-    # Append a key=value to the results CSV
+    # Upsert a row into the results CSV, keyed by (runtime,metric): drop any
+    # prior row for the same key first, so re-running a single phase refreshes
+    # the value instead of appending a stale duplicate the report might pick.
     local runtime="$1" metric="$2" value="$3" unit="${4:-}"
-    echo "$runtime,$metric,$value,$unit" >> "$REPORT_DIR/results.csv"
+    local csv="$REPORT_DIR/results.csv"
+    if [ -f "$csv" ]; then
+        grep -v "^${runtime},${metric}," "$csv" > "$csv.tmp" 2>/dev/null || true
+        mv "$csv.tmp" "$csv"
+    fi
+    echo "$runtime,$metric,$value,$unit" >> "$csv"
 }
 
 # ─── Phase: Setup ────────────────────────────────────────────────────
@@ -204,7 +202,9 @@ do_build() {
         warn "No .env found — using defaults for build args"
     fi
 
-    WORKSPACE=$(eval echo "${WORKSPACE:-/workspace}")
+    WORKSPACE="${WORKSPACE:-/workspace}"
+    WORKSPACE="${WORKSPACE/#\~/$HOME}"
+    WORKSPACE="${WORKSPACE/#\$HOME/$HOME}"
     HOST_UID="${HOST_UID:-$(id -u)}"
     HOST_GID="${HOST_GID:-$(id -g)}"
     SSH_BUILD_USER="${SSH_BUILD_USER:-$USER}"
@@ -291,14 +291,14 @@ do_test() {
         # shellcheck disable=SC1091
         source "$SCRIPT_DIR/.env"
     fi
-    WORKSPACE=$(eval echo "${WORKSPACE:-/workspace}")
+    WORKSPACE="${WORKSPACE:-/workspace}"
+    WORKSPACE="${WORKSPACE/#\~/$HOME}"
+    WORKSPACE="${WORKSPACE/#\$HOME/$HOME}"
 
     # Create a temp directory for test artifacts
     local test_dir="$REPORT_DIR/test-artifacts"
     mkdir -p "$test_dir"
 
-    # Write a small test file for I/O tests
-    dd if=/dev/urandom of="$test_dir/testfile-64mb" bs=1m count=64 2>/dev/null
     ok "Test artifacts prepared"
 
     # ── Test 1: Container startup time ──
@@ -618,7 +618,7 @@ print(f"{elapsed:.3f}s ({count} primes)")
     ok "  Apple reports: $apple_arch"
 
     # ── Cleanup test artifacts ──
-    rm -f "$test_dir/testfile-64mb" "$test_dir/mount-test.txt"
+    rm -f "$test_dir/mount-test.txt"
     rm -f "$test_dir/docker-wrote.txt" "$test_dir/apple-wrote.txt"
 
     echo ""
