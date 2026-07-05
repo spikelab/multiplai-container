@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# ab — drive Vercel agent-browser on the macOS host over the SSH build bridge.
+#
+# Mirrors the mlx_whisper pattern (skills/transcribe): the tool runs natively on
+# the Mac next to Chrome; only CLI verbs + snapshot text cross the SSH boundary.
+# User, key, and connection multiplexing come from ~/.ssh/config (host
+# host.docker.internal), baked in by the Dockerfile.
+#
+# The command MUST start with `agent-browser` to match the host gateway allowlist
+# (container/container-build-gateway.sh). The gateway runs it via `zsh -lc`, which
+# sources ~/.zprofile and so already has Homebrew (/opt/homebrew/bin) on PATH.
+#
+# Mac-side prerequisites (once):
+#   brew install agent-browser && agent-browser install
+#   chrome-agent                 # alias: Chrome + CDP on 127.0.0.1:9222
+#   agent-browser connect 9222   # bind the persistent Mac-side daemon
+#
+# Usage:  ab snapshot -i   |   ab open https://...   |   ab click @e7
+set -euo pipefail
+
+HOST="${AB_HOST:-host.docker.internal}"
+
+exec ssh -q -o BatchMode=yes "$HOST" "agent-browser $(printf '%q ' "$@")"
