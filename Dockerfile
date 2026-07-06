@@ -10,7 +10,7 @@ ARG SSH_BUILD_USER=agent
 
 # --- Tool versions (bump to update; each is referenced by its install step,
 #     so changing one busts exactly that layer's cache) ---
-ARG CLAUDE_VERSION=2.1.201
+ARG CLAUDE_VERSION=2.1.202
 ARG UV_VERSION=0.11.26
 ARG BUN_VERSION=1.3.14
 ARG RUST_TOOLCHAIN=1.96.1
@@ -145,6 +145,13 @@ RUN mkdir -p /home/agent/.ssh && \
 
 ENV PATH="${WORKSPACE}/multiplai-runtime/.venv/bin:/home/agent/.cargo/bin:/home/agent/.local/bin:${PATH}"
 ENV WORKSPACE="${WORKSPACE}"
+
+# CLI updates are owned by the entrypoint (weekly npm refresh into the
+# persistent ~/.claude-cli mount, lock-protected across containers). Claude
+# Code's built-in auto-updater must stay off: the CLI is an npm-prefix install,
+# so the updater targets the global npm prefix (/usr — root-owned here) and
+# every session nags "Auto-update failed: no write permission to npm prefix".
+ENV DISABLE_AUTOUPDATER=1
 
 WORKDIR ${WORKSPACE}
 
