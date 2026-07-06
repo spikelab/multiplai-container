@@ -26,6 +26,17 @@ WORKSPACE="${WORKSPACE/#\~/$HOME}"
 WORKSPACE="${WORKSPACE/#\$HOME/$HOME}"
 
 : "${WORKSPACE:?WORKSPACE must be set in .env}"
+# Guard against the .env.example placeholder and non-existent paths — a bad
+# WORKSPACE bakes a useless mount point into the image and fails at runtime.
+if [ "$WORKSPACE" = "$HOME/your-workspace" ]; then
+    echo "Error: WORKSPACE is still the placeholder ($WORKSPACE)."
+    echo "  Edit .env and set WORKSPACE to your real workspace path."
+    exit 1
+fi
+if [ ! -d "$WORKSPACE" ]; then
+    echo "Error: WORKSPACE directory does not exist: $WORKSPACE"
+    exit 1
+fi
 IMAGE_NAME="${IMAGE_NAME:-claude-multiplai:local}"
 HOST_UID="${HOST_UID:-$(id -u)}"
 HOST_GID="${HOST_GID:-$(id -g)}"

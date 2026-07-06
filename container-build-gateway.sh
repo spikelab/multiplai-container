@@ -3,6 +3,7 @@
 # SSH passes the original command via SSH_ORIGINAL_COMMAND.
 #
 # Install on macOS host:
+#   mkdir -p ~/.local/bin
 #   cp container-build-gateway.sh ~/.local/bin/container-build-gateway.sh
 #   chmod +x ~/.local/bin/container-build-gateway.sh
 #
@@ -68,7 +69,23 @@ url_ok() {
 
 allow=0
 case "$c1" in
-  xcodebuild|xcsift|xcodegen|agent-browser|mlx-whisper|mlx_whisper) allow=1 ;;
+  xcodebuild|xcsift|xcodegen|mlx-whisper|mlx_whisper) allow=1 ;;
+  agent-browser)
+    # SECURITY: `ab` drives the host's REAL Chrome, which can open file:/// URLs
+    # and read ANY host file Chrome can reach — the exact host-file exfiltration
+    # the curl url_ok()/file: guard exists to block. Apply the same file:-scheme
+    # block to navigation verbs so `ab open file:///etc/passwd` is denied.
+    # (Note: the bridge still lets the container drive the host browser at large;
+    # see README ▸ macOS host bridge for the trust caveat.)
+    if [[ "$c2" == (open|goto|navigate) ]]; then
+      i=3
+      while (( i <= ${#words} )); do
+        [[ "${(L)words[i]}" == file:* ]] && deny "agent-browser file: URL not allowed: ${words[i]}"
+        (( i++ ))
+      done
+    fi
+    allow=1
+    ;;
   swift)   [[ "$c2" == (build|run|test|package) ]] && allow=1 ;;
   xcrun)   [[ "$c2" == (simctl|xcresulttool|devicectl) ]] && allow=1 ;;
   command) [[ "$c2" == "-v" ]] && allow=1 ;;

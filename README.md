@@ -46,23 +46,47 @@ docker run -it --rm \
   -v "$HOME/your-workspace:$HOME/your-workspace" \
   -v "$HOME/.claude:/home/agent/.claude" \
   -e WORKSPACE="$HOME/your-workspace" \
-  claude-multiplai:local
+  claude-multiplai:local \
+  claude --dangerously-skip-permissions
 ```
+
+The image's default `CMD` is plain `claude` — the premise of this container
+(container-as-sandbox) is running with `--dangerously-skip-permissions`, so
+append it as shown above. The kit launcher (`./claude.sh`) supplies the flag
+for you; standalone `docker run` does not.
 
 The kit venv sync is skipped automatically in standalone mode (it only runs
 when `CLAUDE_MULTIPLAI_HOME` points at a multiplai-kit checkout).
+
+Building directly with `docker build` (rather than `./build.sh`) on Linux
+should pass `--build-arg HOST_UID=$(id -u) --build-arg HOST_GID=$(id -g)` —
+the Dockerfile defaults (`501`/`20`) are macOS-centric and will mismatch the
+owner of your mounted workspace, making bind-mounted files unwritable.
+`./build.sh` derives these from your current ids automatically.
 
 ### macOS host bridge (optional)
 
 The bridge lets container skills run Mac-only tools (Xcode builds,
 mlx-whisper, driving Chrome via `ab`) over a key-restricted SSH gateway.
 
+> **Security — enable only for containers you trust.** The gateway is an
+> allowlist, but the tools it allows are powerful *by design*: `swift
+> build/run/test` and `xcodebuild` execute build scripts and plugins from the
+> project on the host, and `ab` drives the host's real Chrome, which can read
+> any host file it can open. In other words, enabling the bridge grants the
+> container the ability to **run host-side code and read host files** — not
+> just "a locked-down SSH shell". Only enable it for containers running code
+> you trust.
+
 ```bash
 # On the Mac host:
 ssh-keygen -t ed25519 -f ~/.ssh/build_key -N ''      # container's key
+mkdir -p ~/.local/bin
 cp container-build-gateway.sh ~/.local/bin/ && chmod +x ~/.local/bin/container-build-gateway.sh
 # Prefix the PUBLIC key in ~/.ssh/authorized_keys with the forced command:
 #   restrict,command="~/.local/bin/container-build-gateway.sh" ssh-ed25519 AAAA... container-builds
+# (An absolute path — e.g. /Users/you/.local/bin/container-build-gateway.sh —
+#  is more robust than "~", which sshd does not always expand in command=.)
 # Enable System Settings ▸ General ▸ Sharing ▸ Remote Login.
 ```
 

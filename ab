@@ -10,6 +10,11 @@
 # (container/container-build-gateway.sh). The gateway runs it via `zsh -lc`, which
 # sources ~/.zprofile and so already has Homebrew (/opt/homebrew/bin) on PATH.
 #
+# Limitation: args may NOT contain shell metacharacters ( ; | & < > ` $ ( ) or a
+# newline). The gateway's metachar pre-filter rejects the whole command if any
+# appear — even inside a quoted argument — so verbs whose values need those
+# characters (e.g. typing text with `$`, evaluating JS) cannot be sent via `ab`.
+#
 # Mac-side prerequisites (once):
 #   brew install agent-browser && agent-browser install
 #   chrome-agent                 # alias: Chrome + CDP on 127.0.0.1:9222
