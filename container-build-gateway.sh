@@ -87,6 +87,13 @@ case "$c1" in
     allow=1
     ;;
   swift)   [[ "$c2" == (build|run|test|package) ]] && allow=1 ;;
+  qmd)
+    # Local markdown search over indexed collections (knowhere RESOURCES
+    # retrieval hook). Search/read subcommands plus incremental index
+    # maintenance only — no collection add/remove or init (index scope stays
+    # a human decision on the host), no mcp server.
+    [[ "$c2" == (query|search|vsearch|status|embed|update|ls|get|multi-get) ]] && allow=1
+    ;;
   xcrun)   [[ "$c2" == (simctl|xcresulttool|devicectl) ]] && allow=1 ;;
   command) [[ "$c2" == "-v" ]] && allow=1 ;;
   open)    [[ "$c2" == "-a" && "${words[3]}" == Simulator* ]] && allow=1 ;;
