@@ -62,6 +62,12 @@ RUN ARCH=$(dpkg --print-architecture) \
         | tar xJ -C /usr/local/bin --strip-components=1 "typst-${TYPST_ARCH}-unknown-linux-musl/typst" \
     && pandoc --version | head -1 && typst --version
 
+# md2pdf — wrapper encoding the canonical invocation, so sessions don't need
+# to know the --pdf-engine flag (bare `pandoc -o x.pdf` defaults to pdflatex,
+# which is deliberately NOT installed).
+COPY md2pdf /usr/local/bin/md2pdf
+RUN chmod +x /usr/local/bin/md2pdf
+
 # Node.js 22 + GitHub CLI (share one apt-get update/cleanup cycle).
 # Nodesource repo is configured via apt keyring directly (no setup_22.x
 # curl|bash); gnupg is needed once for --dearmor and removed afterwards.

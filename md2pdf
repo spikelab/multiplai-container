@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# md2pdf — canonical Markdown→PDF path: pandoc + typst, both baked into the
+# image as static binaries. GFM tables (incl. alignment) and syntax-highlighted
+# code blocks render correctly by default; do NOT fall back to weasyprint,
+# LaTeX, or headless-browser converters.
+#
+# Usage: md2pdf input.md [output.pdf] [extra pandoc args...]
+set -euo pipefail
+
+if [ $# -lt 1 ] || [ "${1}" = "-h" ] || [ "${1}" = "--help" ]; then
+    echo "usage: md2pdf input.md [output.pdf] [extra pandoc args...]" >&2
+    exit 2
+fi
+
+in=$1
+shift
+case "${1:-}" in
+    *.pdf) out=$1; shift ;;
+    *)     out="${in%.*}.pdf" ;;
+esac
+
+exec pandoc "$in" --pdf-engine=typst -o "$out" "$@"
