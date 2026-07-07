@@ -47,7 +47,9 @@ if [ -f "$KIT_REQ_FILE" ]; then
         echo "[venv-sync] Requirements changed — syncing packages ..."
 
         # First pass: try batch install (fast path for all-compatible packages)
-        if "$VENV_PATH/bin/pip" install --quiet -r "$KIT_REQ_FILE" >/dev/null 2>&1; then
+        # python -m pip, not bin/pip: the pip script's shebang hardcodes the
+        # venv's creation path and breaks if the volume is mounted elsewhere.
+        if "$VENV_PATH/bin/python" -m pip install --quiet -r "$KIT_REQ_FILE" >/dev/null 2>&1; then
             echo "[venv-sync] All packages installed successfully."
             echo "$CURRENT_HASH" > "$HASH_FILE"
         else
@@ -61,7 +63,7 @@ if [ -f "$KIT_REQ_FILE" ]; then
             while IFS= read -r line; do
                 # Skip comments, blank lines, and pip options
                 [[ "$line" =~ ^[[:space:]]*#|^[[:space:]]*$|^- ]] && continue
-                if ! PKG_ERR=$("$VENV_PATH/bin/pip" install --quiet "$line" 2>&1); then
+                if ! PKG_ERR=$("$VENV_PATH/bin/python" -m pip install --quiet "$line" 2>&1); then
                     PKG_NAME=$(echo "$line" | cut -d'=' -f1 | cut -d'>' -f1 | cut -d'<' -f1 | cut -d'[' -f1)
                     if echo "$PKG_ERR" | grep -qiE 'no matching distribution|not supported on this platform|unsupported platform'; then
                         SKIPPED="$SKIPPED $PKG_NAME"
