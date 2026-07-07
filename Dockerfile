@@ -14,6 +14,8 @@ ARG CLAUDE_VERSION=2.1.202
 ARG UV_VERSION=0.11.26
 ARG BUN_VERSION=1.3.14
 ARG RUST_TOOLCHAIN=1.96.1
+ARG PANDOC_VERSION=3.9
+ARG TYPST_VERSION=0.15.0
 
 # --- All apt packages in one layer, single cache cleanup ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -45,6 +47,20 @@ RUN ARCH=$(dpkg --print-architecture) \
     && curl -fsSL -o /usr/local/bin/cloud-sql-proxy \
         "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${CSP_VERSION}/cloud-sql-proxy.linux.${ARCH}" \
     && chmod +x /usr/local/bin/cloud-sql-proxy
+
+# Markdown → PDF: pandoc + typst, two static binaries, zero system deps.
+# Canonical command: `pandoc input.md --pdf-engine=typst -o output.pdf`
+# (GFM tables incl. alignment + syntax-highlighted code verified 2026-07-07,
+# see knowhere INBOX research report of that date). Typst is pre-1.0 and the
+# pandoc typst writer tracks it, so bump both versions together.
+# Arch mapping: dpkg arm64/amd64 → typst aarch64/x86_64 musl targets.
+RUN ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-${ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin --strip-components=2 "pandoc-${PANDOC_VERSION}/bin/pandoc" \
+    && TYPST_ARCH=$([ "$ARCH" = "arm64" ] && echo aarch64 || echo x86_64) \
+    && curl -fsSL "https://github.com/typst/typst/releases/download/v${TYPST_VERSION}/typst-${TYPST_ARCH}-unknown-linux-musl.tar.xz" \
+        | tar xJ -C /usr/local/bin --strip-components=1 "typst-${TYPST_ARCH}-unknown-linux-musl/typst" \
+    && pandoc --version | head -1 && typst --version
 
 # Node.js 22 + GitHub CLI (share one apt-get update/cleanup cycle).
 # Nodesource repo is configured via apt keyring directly (no setup_22.x
