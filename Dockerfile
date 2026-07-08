@@ -101,6 +101,27 @@ RUN npm install -g vite@8.1.3 ccusage@20.0.14 @usebruno/cli@3.5.1 \
         pyright@1.1.411 typescript-language-server@5.3.0 typescript@6.0.3 \
     && npm cache clean --force
 
+# Scene detection for the screen-demo skill (multiplai-media): PySceneDetect +
+# headless OpenCV in an isolated venv, with the `scenedetect` CLI symlinked onto
+# PATH (screen-demo's prep.py finds it there via _scenedetect_bin). Isolated so
+# the heavy OpenCV wheel never touches the system or kit-runtime python. scenedetect
+# declares non-headless `opencv-python`, so we install its deps ourselves + headless
+# OpenCV, then scenedetect with --no-deps — that keeps the GUI OpenCV out entirely.
+# Scene detection runs locally on the 720p proxy (no GPU, no Metal, no host bridge).
+# Bump these to update; each busts exactly this layer's cache.
+ARG SCENEDETECT_VERSION=0.7
+ARG OPENCV_VERSION=5.0.0.93
+ARG NUMPY_VERSION=2.5.1
+RUN uv venv /opt/scenedetect \
+    && VIRTUAL_ENV=/opt/scenedetect uv pip install --no-cache \
+        "opencv-python-headless==${OPENCV_VERSION}" "numpy==${NUMPY_VERSION}" \
+        "click!=8.3.0,~=8.0" platformdirs tqdm \
+    && VIRTUAL_ENV=/opt/scenedetect uv pip install --no-cache --no-deps \
+        "scenedetect==${SCENEDETECT_VERSION}" \
+    && ln -s /opt/scenedetect/bin/scenedetect /usr/local/bin/scenedetect \
+    && /opt/scenedetect/bin/python -c "import scenedetect, cv2; print('scenedetect', scenedetect.__version__, '| cv2', cv2.__version__)" \
+    && scenedetect version
+
 # Claude Code — install.sh takes the version as its argument, so CLAUDE_VERSION
 # both pins the installed CLI and busts this layer's cache when bumped.
 # Installs to /root/.local/bin/ — copy to /usr/local/bin/ for agent user access.
