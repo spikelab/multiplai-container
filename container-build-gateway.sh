@@ -93,6 +93,9 @@ case "$c1" in
     # maintenance only — no collection add/remove or init (index scope stays
     # a human decision on the host), no mcp server.
     [[ "$c2" == (query|search|vsearch|status|embed|update|ls|get|multi-get) ]] && allow=1
+    # bun installs qmd under ~/.bun/bin, which interactive zsh adds via .zshrc
+    # but the login shell below does not — resolve to the absolute path.
+    [[ -x "$HOME/.bun/bin/qmd" ]] && words[1]="$HOME/.bun/bin/qmd"
     ;;
   xcrun)   [[ "$c2" == (simctl|xcresulttool|devicectl) ]] && allow=1 ;;
   command) [[ "$c2" == "-v" ]] && allow=1 ;;
