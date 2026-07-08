@@ -146,10 +146,14 @@ esac
 
 # Run in a login shell for PATH, but pass argv as data: the inner `exec "$@"`
 # receives the already-tokenized words and never re-parses them. Prepend
-# ~/.bun/bin inside the inner shell (after login init, so path_helper can't
-# reorder it) — bun-installed tools like qmd are otherwise only on the
-# interactive-shell PATH. This widens lookup, not the allowlist.
+# inside the inner shell (after login init, so path_helper can't reorder):
+#   - nvm's node 24 bin: qmd's better-sqlite3 native module is built for
+#     ABI 137 (node 24); homebrew's node on the login PATH drifts ahead on
+#     brew upgrade. Any v24.x matches (ABI is per-major). nvm only loads in
+#     .zshrc, so login shells never see it otherwise.
+#   - ~/.bun/bin: bun-installed tools (qmd itself) live there.
+# This widens lookup for allowlisted commands only, not the allowlist.
 if [ -n "$WORKDIR" ]; then
   cd -- "$WORKDIR" 2>/dev/null || deny "cd failed: $WORKDIR"
 fi
-exec zsh -lc 'path=("$HOME/.bun/bin" $path); exec -- "$@"' zsh "${words[@]}"
+exec zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); exec -- "$@"' zsh "${words[@]}"
