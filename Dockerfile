@@ -189,6 +189,13 @@ RUN mkdir -p /home/agent/.ssh && \
 ENV PATH="${WORKSPACE}/multiplai-runtime/.venv/bin:/home/agent/.cargo/bin:/home/agent/.local/bin:${PATH}"
 ENV WORKSPACE="${WORKSPACE}"
 
+# Marketplace skills detect "am I in the multiplai container?" from this flag
+# (with /.dockerenv as a generic-Docker fallback) instead of inferring it from
+# uname — a plain Linux box must never be mistaken for the container and told
+# to configure the SSH bridge. Keep in sync with the skills' detection rule
+# (multiplai-cc-mktplace docs/degradation-contract.md).
+ENV MULTIPLAI_CONTAINER=1
+
 # CLI updates are owned by the entrypoint (weekly npm refresh into the
 # persistent ~/.claude-cli mount, lock-protected across containers). Claude
 # Code's built-in auto-updater must stay off: the CLI is an npm-prefix install,
