@@ -64,6 +64,23 @@ the Dockerfile defaults (`501`/`20`) are macOS-centric and will mismatch the
 owner of your mounted workspace, making bind-mounted files unwritable.
 `./build.sh` derives these from your current ids automatically.
 
+The image exports `MULTIPLAI_CONTAINER=1`; marketplace skills use it to
+detect the container explicitly (instead of guessing from `uname`) and to
+decide whether bridge instructions are appropriate in error messages.
+
+### What works with / without the host bridge
+
+Without the bridge (bare `docker run`, any host OS), everything that is
+container-native works: the multiplai-context plugin, buildme, code/security
+review, deep-research, the writing and pm packs, youtube-transcript's
+subtitle path, excalidraw, slack/gmail (with your tokens). What does **not**
+work without a macOS host bridge is exactly the Mac-only tooling:
+**transcribe** and screen-demo's transcription step (mlx-whisper needs Apple
+Silicon), **swift-build** (Xcode), and **host-browser** (`ab` → real Chrome).
+Those skills detect the missing bridge and say so — see the marketplace
+[compatibility matrix](https://github.com/spikelab/multiplai-cc-mktplace#compatibility-matrix)
+for the per-skill table.
+
 ### macOS host bridge (optional)
 
 The bridge lets container skills run Mac-only tools (Xcode builds,
