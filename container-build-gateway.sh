@@ -36,6 +36,23 @@ if [[ "$CMD" == "cd "* ]]; then
   CMD="${CMD#* && }"
 fi
 
+# Optional trailing xcsift pipe. The swift-build skill routes build/test output
+# through xcsift for compact, token-efficient results by appending a FIXED,
+# trusted suffix. We can't let a raw `|` through the metacharacter gate below —
+# that would re-open shell-string evaluation of untrusted input, the exact thing
+# this gateway exists to prevent. Instead we recognize ONLY this one exact
+# literal suffix, strip it here (before the metachar check), and re-attach it
+# host-side as a hardcoded constant at exec time. The user-supplied head command
+# is still validated and exec'd as argv data — never re-parsed — so the "no
+# untrusted shell string" invariant holds. Same shape as the `cd ... &&` prefix
+# handling above: strip a known-safe wrapper, validate the rest, exec as data.
+XCSIFT=0
+XCSIFT_SUFFIX=' 2>&1 | xcsift --format toon --quiet'
+if [[ "$CMD" == *"$XCSIFT_SUFFIX" ]]; then
+  XCSIFT=1
+  CMD="${CMD%"$XCSIFT_SUFFIX"}"
+fi
+
 # Reject every shell metacharacter that could chain, substitute, or redirect.
 # After the cd handling above there is no legitimate reason for any of these.
 if [[ "$CMD$WORKDIR" == *[\;\|\&\<\>\`\$\(\)]* || "$CMD$WORKDIR" == *$'\n'* ]]; then
@@ -86,7 +103,7 @@ case "$c1" in
     fi
     allow=1
     ;;
-  swift)   [[ "$c2" == (build|run|test|package) ]] && allow=1 ;;
+  swift)   [[ "$c2" == (build|run|test|package|--version) ]] && allow=1 ;;
   qmd)
     # Local markdown search over indexed collections (knowhere RESOURCES
     # retrieval hook). Search/read subcommands plus incremental index
@@ -155,5 +172,12 @@ esac
 # This widens lookup for allowlisted commands only, not the allowlist.
 if [ -n "$WORKDIR" ]; then
   cd -- "$WORKDIR" 2>/dev/null || deny "cd failed: $WORKDIR"
+fi
+if (( XCSIFT )); then
+  # Trusted, fixed pipeline: the user words run as argv data via "$@"; the
+  # xcsift stage is a hardcoded constant (never from client input). pipefail so
+  # the build/test exit status wins over xcsift's. Can't use the final `exec`
+  # here — a pipeline needs the shell to stay alive to wire both stages.
+  exec zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); set -o pipefail; "$@" 2>&1 | xcsift --format toon --quiet' zsh "${words[@]}"
 fi
 exec zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); exec -- "$@"' zsh "${words[@]}"
