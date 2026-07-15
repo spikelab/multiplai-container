@@ -24,7 +24,8 @@ Consequences you must respect:
 
 ## How to release — `./release.sh`
 
-One command does the whole chain atomically, or nothing:
+One command does the whole chain — all local work first, then both pushes
+last, back-to-back (so the only failure window is a single push):
 
 ```
 ./release.sh minor        # 0.4 → 0.5, tag v0.5
