@@ -21,6 +21,8 @@ usable standalone.
 |------|---------|
 | `Dockerfile` | Image definition. Build args: `HOST_UID`, `HOST_GID`, `WORKSPACE`, `SSH_BUILD_USER` |
 | `build.sh` | Builds the image from `.env` config (kit root `.env`, or one next to this script) |
+| `release.sh` | Maintainer release tool — build-gated tag + kit pin bump (see [Releasing](#releasing-maintainers)) |
+| `VERSION` | Last released version; `release.sh` bumps it and tags `v<VERSION>` |
 | `venv-sync-entrypoint.sh` | Entrypoint — syncs the Linux venv, then execs `claude` (or bash) |
 | `ab` | Drive Vercel `agent-browser` against the host's real Chrome over the SSH bridge |
 | `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac |
@@ -110,6 +112,39 @@ cp container-build-gateway.sh ~/.local/bin/ && chmod +x ~/.local/bin/container-b
 Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 (`$HOME/.ssh/build_key`) in `.env`, and mount the key into the container:
 `-v "$HOME/.ssh/build_key:/home/agent/.ssh/build_key:ro"`.
+
+## Releasing (maintainers)
+
+**This repo is consumed at an immutable tag, not `main`.** The kit
+(`multiplai-kit/setup.sh`) pins it via `CONTAINER_REF` and fetches that tag
+into its `container/` checkout. So **merging a fix to `main` delivers nothing**
+on its own — a change reaches consumers only when a new tag is cut *and* the
+kit's pin is bumped to it.
+
+Do both in one gated step with `release.sh`:
+
+```bash
+./release.sh minor            # 0.4 → 0.5, tag v0.5
+./release.sh patch            # 0.4 → 0.4.1
+./release.sh 0.5              # explicit version
+./release.sh minor --dry-run  # preview; no writes
+```
+
+It refuses unless `main` is clean and in sync with `origin`, **requires
+`docker build` to pass** (you can't tag a broken image), then tags + pushes and
+**bumps `CONTAINER_REF` in the kit and pushes that too**. Consumers pick it up
+with `git pull && ./setup.sh`, which re-pins `container/`, rebuilds the image,
+and reinstalls the host gateway.
+
+Rules of the road:
+
+- **Never hand-edit the kit's `container/` checkout.** It's a pinned,
+  detached-HEAD checkout `setup.sh` re-aligns to the tag; edits there are
+  transient (silently reverted next setup) and invisible to others.
+- **Tags are immutable** — cut a new one; never move an existing tag. Keep old
+  tags as rollback points (pin `CONTAINER_REF=v0.4` to roll back).
+- Releasing against a fork or from another checkout: `--kit <path>` /
+  `$MULTIPLAI_KIT` selects the kit to bump; `--no-kit` tags only.
 
 ## License
 
