@@ -55,8 +55,29 @@ fi
 
 # Reject every shell metacharacter that could chain, substitute, or redirect.
 # After the cd handling above there is no legitimate reason for any of these.
-if [[ "$CMD$WORKDIR" == *[\;\|\&\<\>\`\$\(\)]* || "$CMD$WORKDIR" == *$'\n'* ]]; then
+#
+# Escape-aware: the client %q-escapes arguments, so a path/scheme may contain
+# `\(`, `\ `, etc. A backslash-escaped character is exactly what the (z)
+# tokenizer below treats as a literal word character — it can never act as a
+# separator, substitution, or redirect — and after (Q) it travels only as argv
+# DATA (never re-parsed by a shell). So strip `\<char>` pairs first and run the
+# deny-list on the residue: every unescaped metachar is still caught (same
+# deny-by-default gate), while escaped ones pass as data. Raw newlines are
+# denied on the ORIGINAL string — a backslash-newline could hide one from the
+# residue. Quoted metachars (`"("`) remain in the residue and stay denied:
+# conservative, and the %q client never produces them.
+RESIDUE="${CMD//\\?/}${WORKDIR//\\?/}"
+if [[ "$RESIDUE" == *[\;\|\&\<\>\`\$\(\)]* || "$CMD$WORKDIR" == *$'\n'* ]]; then
   deny "shell metacharacter in command"
+fi
+
+# Unquote the workdir the same way argv words are unquoted below, so a
+# %q-escaped path (spaces, parens) cd's to its literal value. It must
+# tokenize to exactly ONE word — anything else is a malformed prefix.
+if [[ -n "$WORKDIR" ]]; then
+  wd_words=(${(Q)${(z)WORKDIR}})
+  (( ${#wd_words} == 1 )) || deny "malformed cd prefix: directory must be a single (escaped) word"
+  WORKDIR="${wd_words[1]}"
 fi
 
 # Tokenize honoring quotes only. (z) splits like the shell parser; (Q) then
@@ -67,6 +88,16 @@ fi
 words=(${(Q)${(z)CMD}})
 (( ${#words} )) || deny "empty command"
 c1="${words[1]}"; c2="${words[2]}"
+
+# The xcsift pipe exists solely to compact build/test output. Only the build
+# tools may carry it — for every other allowlisted head (qmd, curl, …) the
+# suffix is an anomaly, so keep deny-by-default and reject it.
+if (( XCSIFT )); then
+  case "$c1" in
+    swift|xcodebuild|xcrun) ;;
+    *) deny "xcsift pipe only allowed on build commands (swift/xcodebuild/xcrun), not: $c1" ;;
+  esac
+fi
 
 # Only URLs to the local host over http/https are allowed for curl; file:// and
 # any non-loopback host are rejected. Applied to every argument, not just one.
