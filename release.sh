@@ -60,7 +60,9 @@ done
 say()  { printf '  %s\n' "$*"; }
 step() { printf '\n▸ %s\n' "$*"; }
 die()  { printf 'release: %s\n' "$*" >&2; exit 1; }
-run()  { if $DRY_RUN; then printf '  [dry-run] %s\n' "$*"; else eval "$*"; fi; }
+# Execute argv directly — arguments are never re-parsed by the shell, so a
+# tag/version containing shell metachars can't inject.
+run()  { if $DRY_RUN; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
 
 # ---- preflight: clean, on main, up to date ---------------------------------
 step "Preflight"
@@ -120,7 +122,17 @@ if $DO_KIT; then
   [ -n "$KIT_DIR" ] && [ -f "$KIT_DIR/setup.sh" ] || die "kit not found — pass --kit <path>, set \$MULTIPLAI_KIT, or use --no-kit"
   grep -qE 'CONTAINER_REF:-v[0-9]' "$KIT_DIR/setup.sh" || die "no CONTAINER_REF default found in $KIT_DIR/setup.sh"
   [ -z "$(git -C "$KIT_DIR" status --porcelain setup.sh)" ] || die "kit setup.sh has uncommitted changes — resolve first"
-  say "kit: $KIT_DIR"
+  # Structural guard: the pin commit must land on the kit SOURCE's main and be
+  # pushable to origin/main. This refuses runtime checkouts
+  # (~/.multiplai-runtimes/*, which carry a local config-drift commit) and any
+  # stale or diverged clone — publishing from those pushes the wrong history.
+  KIT_BRANCH="$(git -C "$KIT_DIR" branch --show-current)"
+  [ "$KIT_BRANCH" = "main" ] || die "kit at $KIT_DIR is on '${KIT_BRANCH:-<detached>}', not main — point --kit at the kit SOURCE clone (e.g. PROJECTS/multiplai-kit), never a runtime checkout"
+  git -C "$KIT_DIR" fetch --quiet origin main || die "cannot fetch origin/main in kit at $KIT_DIR"
+  KIT_LOCAL="$(git -C "$KIT_DIR" rev-parse @)"
+  KIT_REMOTE="$(git -C "$KIT_DIR" rev-parse origin/main)"
+  [ "$KIT_LOCAL" = "$KIT_REMOTE" ] || die "kit main ($(git -C "$KIT_DIR" rev-parse --short @)) not in sync with origin/main ($(git -C "$KIT_DIR" rev-parse --short origin/main)) — a runtime checkout carries a local drift commit and a stale clone misses history; expected flow: edit in the kit SOURCE, pull/push it, then release with --kit <kit-source>"
+  say "kit: $KIT_DIR (main, in sync with origin)"
 fi
 
 # ---- confirm ---------------------------------------------------------------
@@ -133,9 +145,10 @@ fi
 
 # ---- tag this repo (local only; pushes happen last, together) --------------
 step "Tagging $TAG (local)"
-run "printf '%s\n' '$NORM' > VERSION"
-run "git add VERSION && git commit -q -m 'chore(release): $TAG'"
-run "git tag -a '$TAG' -m 'Release $TAG'"
+if $DRY_RUN; then say "[dry-run] write VERSION=$NORM"; else printf '%s\n' "$NORM" > VERSION; fi
+run git add VERSION
+run git commit -q -m "chore(release): $TAG"
+run git tag -a "$TAG" -m "Release $TAG"
 say "committed + tagged locally"
 
 # ---- bump kit pin (local only; pushed last) --------------------------------
@@ -148,7 +161,12 @@ if $DO_KIT; then
     tmp="$(mktemp)"
     sed -E "s#(CONTAINER_REF:-)v[0-9][0-9.]*#\1${TAG}#" "$SETUP" > "$tmp"
     grep -qF "CONTAINER_REF:-${TAG}}" "$tmp" || { rm -f "$tmp"; die "kit pin rewrite failed — CONTAINER_REF not updated"; }
-    mv "$tmp" "$SETUP"
+    # Write content in place (keeps $SETUP's inode + mode). A `mv` from mktemp
+    # replaced the file with a 0600 temp and silently dropped the executable
+    # bit — that regression shipped with v0.5 (kit commit 6ad8f64).
+    cat "$tmp" > "$SETUP"
+    rm -f "$tmp"
+    [ -x "$SETUP" ] || die "kit setup.sh is not executable after the pin rewrite — restore it (chmod +x, commit) and re-run"
     git -C "$KIT_DIR" add setup.sh
     git -C "$KIT_DIR" commit -q -m "chore(container): pin CONTAINER_REF to $TAG"
     say "kit pinned to $TAG (committed, not yet pushed)"
@@ -161,7 +179,9 @@ fi
 # not shipped. If the kit push below fails, recover with a single
 # `git -C "$KIT_DIR" push origin HEAD` — nothing else is left half-done.
 step "Publishing"
-run "git push --quiet origin main '$TAG'"
+# --atomic: main and the tag land together or not at all — a raced rejection
+# of main can't leave an orphaned public tag behind.
+run git push --atomic --quiet origin main "$TAG"
 say "pushed container main + $TAG"
 if $DO_KIT; then
   if $DRY_RUN; then
