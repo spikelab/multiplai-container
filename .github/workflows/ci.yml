@@ -1,0 +1,73 @@
+# CI for multiplai-container — cheap, hermetic checks only.
+#
+# What runs: syntax checks over every shipped script, shellcheck over the
+# scripts that pass it cleanly, and the gateway allowlist harness (the only
+# automated test of the container→host security boundary).
+#
+# What does NOT run, and why:
+#   * `docker build` (the gate release.sh enforces locally). The image pulls the
+#     Google Cloud SDK, Node, uv, bun, pandoc and typst — many minutes per run
+#     on a hosted runner for a Dockerfile that changes rarely — and it needs
+#     HOST_UID/HOST_GID/WORKSPACE build args that only make sense on a
+#     developer's machine. `release.sh` refuses to cut a tag unless the build
+#     passes there, which is where the check has teeth: nothing ships from CI.
+#   * shellcheck over release.sh (SC1083 false positive on git's `@{u}` rev
+#     syntax), container-build-gateway.sh (zsh — SC1071, unsupported by
+#     shellcheck), and apple-containers-experiment.sh / tests/gateway-test.sh
+#     (informational findings only). Tracked as an issue rather than fixed here.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  syntax:
+    name: script syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zsh (the gateway is a zsh script)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - name: bash -n
+        run: |
+          for f in build.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
+                   apple-containers-experiment.sh tests/gateway-test.sh; do
+            echo "== $f"
+            bash -n "$f"
+          done
+      - name: zsh -n (container-build-gateway.sh)
+        run: zsh -n container-build-gateway.sh
+      - name: shipped scripts are executable
+        run: |
+          for f in build.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
+                   container-build-gateway.sh apple-containers-experiment.sh \
+                   tests/gateway-test.sh; do
+            test -x "$f" || { echo "$f is not executable"; exit 1; }
+          done
+
+  shellcheck:
+    name: shellcheck (clean scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck --version
+        run: shellcheck --version
+      - name: shellcheck
+        run: shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf
+
+  gateway-tests:
+    name: gateway allowlist harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install zsh
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+      - name: tests/gateway-test.sh
+        run: ./tests/gateway-test.sh
