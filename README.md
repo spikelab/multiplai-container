@@ -4,8 +4,8 @@
 
 A sandboxed Docker environment for running Claude Code with
 `--dangerously-skip-permissions` safely — the container IS the sandbox.
-Part of the [Multiplai](https://github.com/spikelab/multiplai-kit) suite,
-usable standalone.
+Used by [multiplai-kit](https://github.com/spikelab/multiplai-kit), usable
+standalone.
 
 ## What's in the image
 
@@ -21,14 +21,21 @@ usable standalone.
 
 | File | Purpose |
 |------|---------|
+| `CHANGELOG.md` | What each tag changed, for consumers deciding whether to advance `CONTAINER_REF` |
+| `CLAUDE.md` | Repo guide for agents — the release contract and the gateway's security invariant |
 | `Dockerfile` | Image definition. Build args: `HOST_UID`, `HOST_GID`, `WORKSPACE`, `SSH_BUILD_USER` |
-| `build.sh` | Builds the image from `.env` config (kit root `.env`, or one next to this script) |
-| `release.sh` | Maintainer release tool — build-gated tag + kit pin bump (see [Releasing](#releasing-maintainers)) |
+| `LICENSE` | MIT |
+| `README.md` | This file |
+| `SECURITY.md` | Threat model of the optional host bridge, supported versions, how to report |
 | `VERSION` | Last released version; `release.sh` bumps it and tags `v<VERSION>` |
-| `venv-sync-entrypoint.sh` | Entrypoint — syncs the Linux venv, then execs `claude` (or bash) |
 | `ab` | Drive Vercel `agent-browser` against the host's real Chrome over the SSH bridge |
-| `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac |
 | `apple-containers-experiment.sh` | Experimental: Apple `container` runtime instead of Docker |
+| `build.sh` | Builds the image from `.env` config (kit root `.env`, or one next to this script) |
+| `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac |
+| `md2pdf` | Markdown→PDF wrapper baked into the image (`pandoc --pdf-engine=typst`) |
+| `release.sh` | Maintainer release tool — build- and changelog-gated tag + kit pin bump (see [Releasing](#releasing-maintainers)) |
+| `tests/gateway-test.sh` | ALLOW/DENY harness exercising the gateway's forced-command allowlist |
+| `venv-sync-entrypoint.sh` | Entrypoint — syncs the Linux venv, then execs `claude` (or bash) |
 
 ## Use via multiplai-kit (recommended)
 
@@ -133,8 +140,12 @@ Do both in one gated step with `release.sh`:
 ```
 
 It refuses unless `main` is clean and in sync with `origin`, **requires
-`docker build` to pass** (you can't tag a broken image), then tags + pushes and
-**bumps `CONTAINER_REF` in the kit and pushes that too**. Consumers pick it up
+`docker build` to pass** (you can't tag a broken image) and **requires notes
+under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md)** (you can't tag an
+undescribed change — there is no `--skip-changelog`), then tags + pushes and
+**bumps `CONTAINER_REF` in the kit and pushes that too**. The release commit
+carries the changelog section, renamed to the new version and dated. Consumers
+pick it up
 with `git pull && ./setup.sh`, which re-pins `container/`, rebuilds the image,
 and reinstalls the host gateway.
 

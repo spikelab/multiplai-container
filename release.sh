@@ -13,10 +13,13 @@
 # and pushes both repos LAST, back-to-back — so the only failure window is a
 # single push, not a half-finished multi-step edit stranded across two repos:
 #
-#   main clean + up to date  →  docker build MUST pass  →  commit+tag (local)
+#   main clean + up to date  →  docker build MUST pass  →  CHANGELOG.md's
+#     ## [Unreleased] MUST have notes  →  commit+tag (local)
 #     →  commit kit pin (local)  →  push container tag  →  push kit pin
 #
-# You cannot tag a broken image. If the final kit push fails the recovery is a
+# You cannot tag a broken image, and you cannot tag an undescribed change: the
+# changelog gate renames ## [Unreleased] to the new version, dates it, adds the
+# compare link, and commits it with the release. There is no --skip-changelog. If the final kit push fails the recovery is a
 # one-liner — `git -C <kit> push origin HEAD` — because everything else is
 # already committed locally.
 #
@@ -109,6 +112,63 @@ else
   say "image built OK"
 fi
 
+# ---- changelog gate --------------------------------------------------------
+# Consumers pin this repo by tag; a tag with no notes is a change nobody can
+# read. So release notes are a gate, exactly like the build: no notes, no tag.
+# There is deliberately no --skip-changelog — a bypass becomes the habit.
+CHANGELOG="CHANGELOG.md"
+TODAY="$(date +%F)"
+
+# Body of the ## [Unreleased] section, with blank lines and HTML comments
+# dropped — what's left is the actual notes (empty ⇒ nothing to release).
+unreleased_body() {
+  awk '/^## \[Unreleased\]/ {f=1; next} f && /^## / {exit} f' "$CHANGELOG" \
+    | grep -vE '^[[:space:]]*(<!--.*-->)?[[:space:]]*$' || true
+}
+
+# Rename ## [Unreleased] → ## [$NORM] – <today>, put a fresh empty Unreleased
+# above it, and append the compare link at the end of the released section.
+# Written in place (cat >) to keep the file's inode and mode.
+release_changelog() {
+  local tmp; tmp="$(mktemp)"
+  awk -v ver="$NORM" -v date="$TODAY" -v link="[$NORM]: $COMPARE_URL" '
+    !done && /^## \[Unreleased\]/ {
+      print "## [Unreleased]"; print ""; print "## [" ver "] – " date
+      done=1; inrel=1; next
+    }
+    inrel && /^## / { print link; print ""; inrel=0 }
+    { print }
+    END { if (inrel) { print ""; print link } }
+  ' "$CHANGELOG" > "$tmp"
+  grep -qF "## [$NORM] – $TODAY" "$tmp" || { rm -f "$tmp"; die "changelog rewrite failed — '## [Unreleased]' not renamed"; }
+  cat "$tmp" > "$CHANGELOG"
+  rm -f "$tmp"
+}
+
+step "Changelog gate"
+[ -f "$CHANGELOG" ] || die "no $CHANGELOG — this repo is consumed by tag; write release notes before tagging (see https://keepachangelog.com/en/1.1.0/)"
+grep -q '^## \[Unreleased\]' "$CHANGELOG" || die "$CHANGELOG has no '## [Unreleased]' heading — add one and describe $TAG under it"
+[ -n "$(unreleased_body)" ] || die "$CHANGELOG: '## [Unreleased]' is empty — describe what $TAG changes for consumers (Added/Changed/Fixed/Security) before tagging. There is no --skip-changelog: a tag pin is all consumers have to go on."
+say "'## [Unreleased]' has notes ($(unreleased_body | wc -l | tr -d ' ') lines)"
+
+# Compare link: previous released tag → this one (normalized the same way).
+case "$CUR" in
+  *.*.0) PREV_NORM="${CUR%.0}" ;;
+  *)     PREV_NORM="$CUR" ;;
+esac
+PREV_TAG="v$PREV_NORM"
+git rev-parse -q --verify "refs/tags/$PREV_TAG" >/dev/null \
+  || PREV_TAG="$(git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/tags | head -1)"
+ORIGIN_URL="$(git remote get-url origin)"
+REPO_WEB="https://github.com/$(printf '%s' "$ORIGIN_URL" | sed -E 's#(^git@[^:]+:|^https?://[^/]+/)##; s#\.git$##')"
+if [ -n "$PREV_TAG" ]; then
+  COMPARE_URL="$REPO_WEB/compare/$PREV_TAG...$TAG"
+else
+  COMPARE_URL="$REPO_WEB/releases/tag/$TAG"
+fi
+say "will rewrite '## [Unreleased]' → '## [$NORM] – $TODAY' (+ fresh empty Unreleased, + $COMPARE_URL)"
+$DRY_RUN && say "[dry-run] $CHANGELOG left untouched"
+
 # ---- locate kit (before tagging, so we fail early) -------------------------
 if $DO_KIT; then
   if [ -z "$KIT_DIR" ]; then
@@ -147,6 +207,13 @@ fi
 step "Tagging $TAG (local)"
 if $DRY_RUN; then say "[dry-run] write VERSION=$NORM"; else printf '%s\n' "$NORM" > VERSION; fi
 run git add VERSION
+if $DRY_RUN; then
+  say "[dry-run] date $CHANGELOG's Unreleased section as [$NORM] – $TODAY, append $COMPARE_URL"
+else
+  release_changelog
+  say "changelog: [$NORM] – $TODAY"
+fi
+run git add "$CHANGELOG"
 run git commit -q -m "chore(release): $TAG"
 run git tag -a "$TAG" -m "Release $TAG"
 say "committed + tagged locally"
