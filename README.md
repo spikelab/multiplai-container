@@ -1,5 +1,7 @@
 # multiplai-container
 
+> Part of the **[Multiplai suite](https://github.com/spikelab/multiplai)** — what the suite is, how the five repos fit together, and which part you need.
+
 A sandboxed Docker environment for running Claude Code with
 `--dangerously-skip-permissions` safely — the container IS the sandbox.
 Part of the [Multiplai](https://github.com/spikelab/multiplai-kit) suite,
