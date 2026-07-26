@@ -44,9 +44,11 @@ jobs:
           done
       - name: zsh -n (container-build-gateway.sh)
         run: zsh -n container-build-gateway.sh
+      # Scripts invoked as ./script must carry the exec bit in git. (`ab` and
+      # `md2pdf` are COPY'd and chmod'ed by the Dockerfile, so they are exempt.)
       - name: shipped scripts are executable
         run: |
-          for f in build.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
+          for f in build.sh release.sh venv-sync-entrypoint.sh \
                    container-build-gateway.sh apple-containers-experiment.sh \
                    tests/gateway-test.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
