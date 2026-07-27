@@ -37,6 +37,12 @@ sandboxed Claude Code container) and predates this changelog.
 - `README.md`: the `Files` table now lists every shipped file, including
   `md2pdf` and `tests/gateway-test.sh`; the intro no longer links the kit under
   the name "Multiplai" (the umbrella banner is the single suite pointer).
+- `README.md` restructured usage-first: the standalone `docker run` quickstart
+  now directly follows the intro, and the file inventory sits below all usage
+  sections. The "Releasing (maintainers)" section moved to `CLAUDE.md` (which
+  now carries the full flow, including the changelog gate); a one-line pointer
+  remains in the README. The host-bridge security callout is unchanged, only
+  repositioned.
 
 ## [0.6] – 2026-07-26
 

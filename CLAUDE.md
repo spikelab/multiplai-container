@@ -35,10 +35,14 @@ last, back-to-back (so the only failure window is a single push):
 ```
 
 It refuses unless `main` is clean and in sync with origin, **requires
-`docker build` to pass** (you cannot tag a broken image), tags + pushes, then
+`docker build` to pass** (you cannot tag a broken image) and **requires notes
+under `## [Unreleased]` in `CHANGELOG.md`** (you cannot tag an undescribed
+change — there is deliberately no `--skip-changelog`), tags + pushes, then
 **bumps `CONTAINER_REF` in the kit and pushes that too** — closing the
-two-repo seam by hand is what used to break. Consumers then get it via
-`git pull && ./setup.sh`.
+two-repo seam by hand is what used to break. The release commit carries the
+changelog section, renamed to the new version and dated. Consumers then get it
+via `git pull && ./setup.sh`, which re-pins `container/`, rebuilds the image,
+and reinstalls the host gateway.
 
 - Keep occasional tags as **rollback points**, not a burden — pin
   `CONTAINER_REF=v0.4` to roll back.
