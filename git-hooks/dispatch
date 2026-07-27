@@ -1,0 +1,177 @@
+#!/usr/bin/env bash
+#
+# Shared git hook dispatcher — the container's secret-leak gate.
+#
+# /etc/gitconfig sets core.hooksPath to the directory holding this script, so
+# EVERY repository touched inside the container runs it, with no per-repo setup
+# and nothing to forget on a freshly cloned repo. That is the whole point: the
+# realistic failure mode is a secret committed in a repo nobody remembered to
+# wire up — by a human in a hurry or by an agent.
+#
+# Two responsibilities, in this order:
+#
+#   1. Scan for secrets (gitleaks), on the two hooks where it can still help:
+#        pre-commit — scans the staged diff. Blocks BEFORE a commit object
+#                     exists, so there is nothing to rewrite afterwards.
+#        pre-push   — scans the commit range actually being pushed. This is the
+#                     backstop for commits made with --no-verify, or made
+#                     outside the container where this hook never ran. It is
+#                     also the ONLY secret gate for private repos: GitHub's
+#                     free secret scanning and push protection cover public
+#                     repos only.
+#
+#   2. Chain to the repository's own hook of the same name, if it has one.
+#      core.hooksPath REPLACES .git/hooks wholesale — it is not additive — so
+#      without this delegation, installing a shared hook would silently disable
+#      every existing repo-local hook. That would have broken multiplai-gui's
+#      pre-push guard (which blocks pushing private `archive/*` refs) and
+#      knowhere's own credential-guard pre-commit. Silently weakening one
+#      control while installing another is worse than installing nothing.
+#
+# Hooks other than pre-commit/pre-push exist here purely to preserve #2. They
+# exec straight through, untouched.
+#
+# Escape hatch: `git commit --no-verify` / `git push --no-verify`, and nothing
+# else. There is deliberately no MULTIPLAI_SKIP=1 env var — an env-var bypass
+# is a channel an agent can take on its own, quietly, mid-task. --no-verify is
+# a deliberate act typed by a human, and pre-push still catches what a skipped
+# pre-commit let through.
+
+set -uo pipefail
+
+hook_name="${0##*/}"
+hook_dir="${0%/*}"
+
+# The baseline ruleset ships next to this script. It is gitleaks' defaults plus
+# the patterns those defaults verifiably miss — most importantly the sk-ant-*
+# family (Anthropic API keys and Claude OAuth tokens), which upstream gitleaks
+# does not detect in any form. See gitleaks.toml for the tested evidence.
+config="$hook_dir/gitleaks.toml"
+
+# The repo's own hooks live at "$(git rev-parse --git-dir)/hooks". Do NOT use
+# `git rev-parse --git-path hooks` here: that resolves core.hooksPath, which
+# points back at THIS directory, and the dispatcher would exec itself forever.
+git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
+own_hook="$git_dir/hooks/$hook_name"
+
+# Fail closed. core.hooksPath is only set inside the container image, which
+# ships the gitleaks binary in the same layer, so a missing binary means a
+# broken image — not an environment we should quietly stop scanning in.
+require_gitleaks() {
+    if ! command -v gitleaks >/dev/null 2>&1; then
+        printf '%s\n' \
+            "secret-scan: gitleaks not found on PATH — refusing to proceed." \
+            "  This gate is baked into the multiplai container image; a missing" \
+            "  binary means the image is broken. Rebuild it, or bypass this one" \
+            "  operation deliberately with --no-verify." >&2
+        exit 1
+    fi
+    # Same reasoning for the ruleset: running with upstream defaults instead
+    # would silently stop catching sk-ant-* tokens, which is the specific gap
+    # this file exists to close. Degrading quietly is the failure we are
+    # avoiding, so treat it as fatal.
+    if [ ! -f "$config" ]; then
+        printf '%s\n' \
+            "secret-scan: ruleset missing at $config — refusing to proceed." \
+            "  Scanning with upstream defaults would miss Anthropic keys and" \
+            "  Claude OAuth tokens entirely. Rebuild the image." >&2
+        exit 1
+    fi
+}
+
+# --redact is not cosmetic: without it gitleaks prints the matched secret to
+# stdout, where it lands in terminal scrollback, CI logs, and an agent's
+# session transcript. A leak report must not itself leak the value.
+#
+# --config outranks any repo-local .gitleaks.toml, which is intended: see the
+# header of gitleaks.toml for why a repo must not be able to switch the gate
+# off by committing a file.
+GITLEAKS_COMMON=(--no-banner --redact --log-level warn --config "$config")
+
+leak_banner() {
+    printf '%s\n' \
+        "" \
+        "============================================================" \
+        " SECRET SCAN: $1 blocked" \
+        "============================================================" \
+        " gitleaks matched a secret pattern (value redacted above)." \
+        "" \
+        " If it is a real secret: remove it, move it to an env var or" \
+        " an ignored .env file, and rotate it — assume it is burned." \
+        "" \
+        " If it is a false positive, pick ONE:" \
+        "   - append a  # gitleaks:allow  comment on that line" \
+        "   - record the finding's fingerprint in the repo's .gitleaksignore" \
+        " Use --no-verify only when you have checked the finding by hand." \
+        "============================================================" >&2
+}
+
+scan_staged() {
+    require_gitleaks
+    if ! gitleaks git --staged "${GITLEAKS_COMMON[@]}"; then
+        leak_banner "commit"
+        exit 1
+    fi
+}
+
+# stdin for pre-push is one line per ref: <local ref> <local sha> <remote ref>
+# <remote sha>. Scan only what this push would actually add to the remote, so
+# pushing a branch does not re-scan (and re-report) history the remote already
+# has.
+scan_push_range() {
+    local input="$1" local_ref local_sha remote_sha range
+    local zero="0000000000000000000000000000000000000000"
+
+    [ -n "$input" ] || return 0
+    require_gitleaks
+
+    # The third field (remote ref name) is not needed; read into `_`.
+    while read -r local_ref local_sha _ remote_sha; do
+        [ -n "${local_sha:-}" ] || continue
+        # Branch deletion — no content is being sent.
+        [ "$local_sha" = "$zero" ] && continue
+
+        if [ "$remote_sha" = "$zero" ]; then
+            # New ref on the remote: everything reachable from it that no other
+            # remote-tracking ref already has.
+            range="$local_sha --not --remotes"
+        else
+            range="$remote_sha..$local_sha"
+        fi
+
+        if ! gitleaks git --log-opts "$range" "${GITLEAKS_COMMON[@]}"; then
+            leak_banner "push ($local_ref)"
+            printf '%s\n' \
+                " NOTE: the secret is already in a commit object. Removing the" \
+                " line in a new commit is NOT enough — the blob stays in" \
+                " history. Rewrite the range (git rebase -i / filter-repo) and" \
+                " rotate the credential." >&2
+            exit 1
+        fi
+    done <<<"$input"
+}
+
+case "$hook_name" in
+    pre-commit)
+        scan_staged
+        ;;
+    pre-push)
+        # Consume stdin to scan, then replay it verbatim to the repo's own hook
+        # below — it needs the same ref lines, and they can only be read once.
+        push_stdin="$(cat)"
+        scan_push_range "$push_stdin"
+        if [ -x "$own_hook" ]; then
+            printf '%s\n' "$push_stdin" | "$own_hook" "$@"
+            exit $?
+        fi
+        exit 0
+        ;;
+esac
+
+# Every other hook, and pre-commit once it has passed: hand over completely.
+# exec preserves stdin, argv and exit status, so hooks that read stdin
+# (post-rewrite, and friends) behave exactly as they would with no dispatcher.
+if [ -x "$own_hook" ]; then
+    exec "$own_hook" "$@"
+fi
+exit 0

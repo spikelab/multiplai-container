@@ -16,6 +16,7 @@ ARG BUN_VERSION=1.3.14
 ARG RUST_TOOLCHAIN=1.96.1
 ARG PANDOC_VERSION=3.9
 ARG TYPST_VERSION=0.15.0
+ARG GITLEAKS_VERSION=8.29.0
 
 # --- All apt packages in one layer, single cache cleanup ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -111,6 +112,44 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
     && { cp /root/.local/bin/claude /usr/local/bin/claude 2>/dev/null \
          || cp "$(find /root -name claude -type f -perm /111 2>/dev/null | head -1)" /usr/local/bin/claude; } \
     && rm -rf /root/.local /root/.npm /root/.cache /tmp/*
+
+# gitleaks — secret scanner backing the container-wide git hooks below.
+# Release assets name the architecture x64/arm64, not amd64/arm64, so the dpkg
+# arch needs mapping. Static Go binary, no runtime deps.
+RUN ARCH=$(dpkg --print-architecture) \
+    && GL_ARCH=$([ "$ARCH" = "arm64" ] && echo arm64 || echo x64) \
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
+        | tar xz -C /usr/local/bin gitleaks \
+    && chmod +x /usr/local/bin/gitleaks \
+    && gitleaks version
+
+# Container-wide git hooks: scan every commit and every push for secrets.
+#
+# core.hooksPath is set in the SYSTEM config (/etc/gitconfig) rather than the
+# agent user's ~/.gitconfig, because that file is written at runtime by
+# `gh auth setup-git` — system config is out of its way, and precedence still
+# works out (system < global < local, and nothing sets hooksPath higher up).
+#
+# One dispatcher, symlinked under each hook name. The names matter: hooksPath
+# REPLACES .git/hooks entirely, so any hook name NOT present here is a
+# repo-local hook silently disabled. The dispatcher chains to the repo's own
+# hook, so listing a name preserves it.
+#
+# Deliberately omitted: reference-transaction, pre-auto-gc, post-index-change.
+# They fire on essentially every ref update and git housekeeping pass, and
+# paying a process spawn each time is not worth it — no repo in this workspace
+# uses them. Add the name here if one ever does.
+COPY git-hooks/dispatch git-hooks/gitleaks.toml /usr/local/share/git-hooks/
+RUN chmod 755 /usr/local/share/git-hooks/dispatch \
+    && chmod 644 /usr/local/share/git-hooks/gitleaks.toml \
+    && for h in applypatch-msg pre-applypatch post-applypatch \
+                pre-commit pre-merge-commit prepare-commit-msg commit-msg \
+                post-commit pre-rebase post-checkout post-merge pre-push \
+                post-rewrite sendemail-validate; do \
+           ln -sf dispatch "/usr/local/share/git-hooks/$h"; \
+       done \
+    && git config --system core.hooksPath /usr/local/share/git-hooks \
+    && test "$(git config --system --get core.hooksPath)" = /usr/local/share/git-hooks
 
 # Create agent user with matching host UID/GID.
 # ubuntu:24.04 ships a built-in `ubuntu` user at UID 1000; if HOST_UID collides

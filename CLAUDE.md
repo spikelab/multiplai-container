@@ -58,6 +58,28 @@ allowlists by command. When widening the allowlist, preserve that invariant
 (strip only known-safe literal wrappers, exec user argv as data). Ship changes
 through `release.sh` like everything else.
 
+## Editing the secret gate (`git-hooks/`)
+
+The image installs `git-hooks/dispatch` as *every* git hook via
+`core.hooksPath` in `/etc/gitconfig`, so it applies to every repo touched
+inside the container. Two invariants to preserve:
+
+- **Never resolve the repo's own hooks with `git rev-parse --git-path hooks`.**
+  That honours `core.hooksPath` and returns the dispatcher's own directory —
+  the hook would exec itself forever. Use `--git-dir` and append `/hooks`.
+- **Keep chaining to `.git/hooks/<name>`.** `core.hooksPath` *replaces*
+  `.git/hooks`; it is not additive. Any hook name missing from the symlink loop
+  in the Dockerfile is a repo-local hook silently disabled.
+
+`git-hooks/gitleaks.toml` is gitleaks' default ruleset plus what it
+demonstrably misses — chiefly the `sk-ant-*` family (Anthropic API keys, Claude
+OAuth access/refresh tokens), which upstream gitleaks **does not detect in any
+form**. That matters here specifically because the kit mounts the host's
+`~/.claude/.credentials.json` into every session. Before trimming a rule, run
+`tests/git-hooks-test.sh` — the `sk-ant-*` case is the canary for the whole
+custom-config path. When bumping `GITLEAKS_VERSION`, re-run that harness (CI
+reads the version straight out of the Dockerfile, so the two cannot drift).
+
 ## Standalone use
 
 The repo works without the kit (`cp .env.example .env`, `./build.sh`). See

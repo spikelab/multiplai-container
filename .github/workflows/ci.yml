@@ -1,8 +1,11 @@
 # CI for multiplai-container — cheap, hermetic checks only.
 #
 # What runs: syntax checks over every shipped script, shellcheck over the
-# scripts that pass it cleanly, and the gateway allowlist harness (the only
-# automated test of the container→host security boundary).
+# scripts that pass it cleanly, the gateway allowlist harness (the only
+# automated test of the container→host security boundary), and the git-hook
+# secret-gate harness (the other one: it proves a secret cannot leave via a
+# commit or a push, and that the custom sk-ant-* ruleset is actually loaded —
+# upstream gitleaks defaults do not detect Anthropic credentials at all).
 #
 # What does NOT run, and why:
 #   * `docker build` (the gate release.sh enforces locally). The image pulls the
@@ -38,7 +41,8 @@ jobs:
       - name: bash -n
         run: |
           for f in build.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
-                   apple-containers-experiment.sh tests/gateway-test.sh; do
+                   apple-containers-experiment.sh tests/gateway-test.sh \
+                   git-hooks/dispatch tests/git-hooks-test.sh; do
             echo "== $f"
             bash -n "$f"
           done
@@ -48,13 +52,15 @@ jobs:
             echo "== $f"
             zsh -n "$f"
           done
-      # Scripts invoked as ./script must carry the exec bit in git. (`ab` and
-      # `md2pdf` are COPY'd and chmod'ed by the Dockerfile, so they are exempt.)
+      # Scripts invoked as ./script must carry the exec bit in git. (`ab`,
+      # `md2pdf` and `git-hooks/dispatch` are COPY'd and chmod'ed by the
+      # Dockerfile, so they are exempt.)
       - name: shipped scripts are executable
         run: |
           for f in build.sh release.sh venv-sync-entrypoint.sh \
                    container-build-gateway.sh apple-containers-experiment.sh \
-                   multiplai-gh-token tests/gateway-test.sh; do
+                   multiplai-gh-token tests/gateway-test.sh \
+                   tests/git-hooks-test.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
 
@@ -66,7 +72,27 @@ jobs:
       - name: shellcheck --version
         run: shellcheck --version
       - name: shellcheck
-        run: shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf
+        run: |
+          shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf \
+                     git-hooks/dispatch tests/git-hooks-test.sh
+
+  git-hooks-tests:
+    name: git hook secret-gate harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned to the same version the Dockerfile installs, so CI cannot pass
+      # against a ruleset the image never runs. Bump both together.
+      - name: Install gitleaks (must match Dockerfile GITLEAKS_VERSION)
+        run: |
+          ver="$(grep -oP 'ARG GITLEAKS_VERSION=\K[0-9.]+' Dockerfile)"
+          test -n "$ver" || { echo "could not read GITLEAKS_VERSION"; exit 1; }
+          echo "installing gitleaks $ver"
+          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz" \
+            | sudo tar xz -C /usr/local/bin gitleaks
+          gitleaks version
+      - name: tests/git-hooks-test.sh
+        run: ./tests/git-hooks-test.sh
 
   gateway-tests:
     name: gateway allowlist harness
