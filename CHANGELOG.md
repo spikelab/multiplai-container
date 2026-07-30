@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.7] – 2026-07-30
+
 ### Added
 
 - `multiplai-gh-token` — host-side minter for **GitHub App installation
@@ -64,6 +66,8 @@ sandboxed Claude Code container) and predates this changelog.
   now carries the full flow, including the changelog gate); a one-line pointer
   remains in the README. The host-bridge security callout is unchanged, only
   repositioned.
+
+[0.7]: https://github.com/spikelab/multiplai-container/compare/v0.6...v0.7
 
 ## [0.6] – 2026-07-26
 
