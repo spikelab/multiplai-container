@@ -42,15 +42,19 @@ jobs:
             echo "== $f"
             bash -n "$f"
           done
-      - name: zsh -n (container-build-gateway.sh)
-        run: zsh -n container-build-gateway.sh
+      - name: zsh -n (the zsh-only scripts)
+        run: |
+          for f in container-build-gateway.sh multiplai-gh-token; do
+            echo "== $f"
+            zsh -n "$f"
+          done
       # Scripts invoked as ./script must carry the exec bit in git. (`ab` and
       # `md2pdf` are COPY'd and chmod'ed by the Dockerfile, so they are exempt.)
       - name: shipped scripts are executable
         run: |
           for f in build.sh release.sh venv-sync-entrypoint.sh \
                    container-build-gateway.sh apple-containers-experiment.sh \
-                   tests/gateway-test.sh; do
+                   multiplai-gh-token tests/gateway-test.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
 

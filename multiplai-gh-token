@@ -1,0 +1,285 @@
+#!/bin/zsh
+# multiplai-gh-token — mint a 1-hour GitHub App installation token on the macOS host.
+#
+# The App private key lives in a mode-600 file on this Mac and NEVER leaves it.
+# Containers reach this script through the SSH gateway allowlist
+# (container-build-gateway.sh) and receive only the short-lived `ghs_` token on
+# stdout. Same property as SSH agent forwarding: usage is proxied, the private
+# key stays put.
+#
+# Several Apps can live side by side, one directory each:
+#
+#   ~/.local/state/multiplai-gh-token/          (mode 700)
+#     default                                   optional: the app name to use
+#     mint.log                                  audit log, one line per mint
+#     <app>/                                    (mode 700)
+#       app-id                                  numeric App ID       (mode 600)
+#       app.pem                                 RSA private key      (mode 600)
+#       org                                     org/user login       (mode 600)
+#
+# Two findings are settled — do not re-derive them (evidence: docs/gh-app-token.md):
+#
+#   * The login Keychain is NOT an option. A non-interactive SSH session cannot
+#     read it at all: securityd has no UI to ask for the unlock password and
+#     returns errSecInteractionNotAllowed (rc=36). Proven 2026-07-28. No
+#     item-level setting fixes it (-T, -A and set-generic-password-partition-list
+#     were all tried); the refusal is at the keychain/session level.
+#   * The Secure Enclave / Touch ID is impossible for this credential. GitHub
+#     requires the App JWT to be signed with RS256 (an RSA key); the Enclave only
+#     holds EC P-256 keys.
+#
+# Install: `multiplai-kit/setup.sh` copies this to ~/.local/bin/ from the pinned
+# container checkout. Host setup (creating the App, installing the key files) is
+# documented in docs/gh-app-token.md.
+#
+# Usage:
+#   multiplai-gh-token [<app>]          # token on stdout, expires_at on stderr
+#   multiplai-gh-token --json [<app>]   # the full mint response (for gh-tok's cache)
+#   multiplai-gh-token --check [<app>]  # validate credentials; NO network, NO token
+#   multiplai-gh-token --help
+#
+# NEVER run the token-printing forms bare in an agent session: stdout lands in
+# the transcript on disk and in API logs. `--check` is the transcript-safe one.
+#
+# Exit codes: 0 ok · 1 config/credential error · 2 GitHub API error
+
+emulate -L zsh
+set -euo pipefail
+umask 077
+
+# Hardcoded, never taken from the environment: the gateway forwards no env, and a
+# secret path that a client could redirect is a foot-gun for no benefit.
+CRED_ROOT="${HOME}/.local/state/multiplai-gh-token"
+LOG="${CRED_ROOT}/mint.log"
+
+die() { print -u2 "multiplai-gh-token: $1"; exit "${2:-1}"; }
+
+usage() {
+  print -r -- "usage: multiplai-gh-token [<app>] | --json [<app>] | --check [<app>] | --help"
+  print -r -- ""
+  print -r -- "  <app>     app profile under $CRED_ROOT/"
+  print -r -- "            (default: the name in ./default, else the only profile present)"
+  print -r -- "  --json    print the full mint response instead of the bare token"
+  print -r -- "  --check   validate the credential directory and exit; no network call,"
+  print -r -- "            no token printed — safe to run inside an agent transcript"
+}
+
+# --- arguments -----------------------------------------------------------------
+MODE=token
+APP=""
+case "${1:-}" in
+  --help|-h) usage; exit 0 ;;
+  --json)    MODE=json;  APP="${2:-}"; (( $# <= 2 )) || die "too many arguments" ;;
+  --check)   MODE=check; APP="${2:-}"; (( $# <= 2 )) || die "too many arguments" ;;
+  -*)        die "unknown argument: $1 (accepts [<app>], --json, --check, --help)" ;;
+  "")        ;;
+  *)         APP="$1"; (( $# <= 1 )) || die "too many arguments" ;;
+esac
+
+for bin in openssl curl jq; do
+  command -v "$bin" >/dev/null || die "missing dependency: $bin"
+done
+
+[[ -d "$CRED_ROOT" ]] || die "credential root missing: $CRED_ROOT — see docs/gh-app-token.md"
+[[ "$(stat -f '%OLp' "$CRED_ROOT")" == 700 ]] || die "$CRED_ROOT must be mode 700 — run: chmod 700 $CRED_ROOT"
+
+# --- pick the app profile ------------------------------------------------------
+# Order: explicit argument · the name in `default` · the sole profile present.
+# Anything else is ambiguous and dies listing what exists, because guessing which
+# GitHub identity to act as is exactly the wrong thing to be clever about.
+list_apps() {
+  local d
+  for d in "$CRED_ROOT"/*(N/); do print -r -- "  ${d:t}"; done
+}
+
+if [[ -z "$APP" ]]; then
+  if [[ -f "$CRED_ROOT/default" && ! -L "$CRED_ROOT/default" ]]; then
+    APP="$(<"$CRED_ROOT/default")"
+    APP="${APP//[[:space:]]/}"
+    [[ -n "$APP" ]] || die "$CRED_ROOT/default is empty"
+  else
+    # `local` is a function-only builtin in zsh, so declare it as a plain array.
+    found=("$CRED_ROOT"/*(N/:t))
+    if (( ${#found} == 1 )); then
+      APP="${found[1]}"
+    elif (( ${#found} == 0 )); then
+      die "no app profiles under $CRED_ROOT — see docs/gh-app-token.md"
+    else
+      print -u2 "multiplai-gh-token: several app profiles exist; name one, or write"
+      print -u2 "  its name to $CRED_ROOT/default. Available:"
+      list_apps >&2
+      exit 1
+    fi
+  fi
+fi
+
+# Validate the name BEFORE it touches a path. Strip the allowed character class
+# and require an empty residue plus a leading alphanumeric: that rejects `/`,
+# `..` and a leading `-` without depending on extended_glob.
+[[ -n "$APP" && "${APP//[A-Za-z0-9._-]/}" == "" && "$APP" == [A-Za-z0-9]* ]] \
+  || die "invalid app name: '$APP' (allowed: alnum . _ -, must start alnum)"
+
+CRED_DIR="$CRED_ROOT/$APP"
+if [[ ! -d "$CRED_DIR" ]]; then
+  print -u2 "multiplai-gh-token: no such app profile: $CRED_DIR"
+  print -u2 "  available:"
+  list_apps >&2
+  exit 1
+fi
+[[ "$(stat -f '%OLp' "$CRED_DIR")" == 700 ]] \
+  || die "credential dir $CRED_DIR must be mode 700 — run: chmod 700 $CRED_DIR"
+
+# --- credentials from disk -----------------------------------------------------
+# The App ID and the org are not secrets, but they live beside the key so there is
+# one directory to move, back up or destroy — and one mode to remember.
+#
+# Permissions are enforced, not assumed: a 0644 private key is exactly the mistake
+# this design must never fail silently on, and it costs one stat() to refuse. Same
+# reasoning as ssh's own refusal to use a group-readable identity file.
+read_cred() {
+  # `f` must be assigned in its own statement: zsh expands the entire command line
+  # before `local` executes, so `f="$CRED_DIR/$name"` on the line below would see an
+  # unset $name — and under `set -u` that is a hard "parameter not set" error.
+  local name="$1" desc="$2" mode f
+  f="$CRED_DIR/$name"
+  [[ -e "$f" ]] || die "missing $desc: $f — see docs/gh-app-token.md"
+  # Reject symlinks: the target's mode is what matters and -O/-L would check the
+  # wrong inode, so a link could smuggle in a world-readable file.
+  [[ ! -L "$f" ]] || die "$desc is a symlink, refusing: $f"
+  [[ -f "$f" ]] || die "$desc is not a regular file: $f"
+  [[ -O "$f" ]] || die "$desc is not owned by ${USER:-this user}: $f"
+  mode="$(stat -f '%OLp' "$f")"          # BSD stat; %OLp = octal perm bits only
+  [[ "$mode" == 600 ]] || die "$desc has mode $mode, want 600 — run: chmod 600 $f"
+  [[ -s "$f" ]] || die "$desc is empty: $f"
+  print -r -- "$(<"$f")"
+}
+
+# `|| exit` is load-bearing, not decoration. read_cred signals failure by exiting, which
+# inside `$(…)` only kills the subshell — and `set -e` does NOT abort on a failed command
+# substitution in an assignment (observed 2026-07-28: the script sailed past a fatal
+# read_cred error and only stopped at the numeric guard below). So check explicitly.
+# For the same reason, never write `${$(read_cred …)//…}`: a parameter expansion discards
+# the status entirely, leaving no way to notice at all.
+APP_ID="$(read_cred app-id "App ID")" || exit 1
+# Strip all whitespace: the App ID is a bare integer, and a trailing newline from
+# `echo > app-id` would otherwise land inside the JWT's iss claim.
+APP_ID="${APP_ID//[[:space:]]/}"
+[[ "$APP_ID" =~ '^[0-9]+$' ]] || die "App ID is not numeric: '$APP_ID'"
+
+PEM="$(read_cred app.pem "App private key")" || exit 1
+if [[ "$PEM" != *"PRIVATE KEY"* ]]; then
+  print -u2 "multiplai-gh-token: $CRED_DIR/app.pem is not a PEM private key"
+  print -u2 "  first line : ${PEM%%$'\n'*}"
+  print -u2 "  expected   : -----BEGIN RSA PRIVATE KEY----- (or BEGIN PRIVATE KEY)"
+  print -u2 "  'BEGIN PUBLIC KEY' or 'ssh-rsa' means the wrong half of the pair;"
+  print -u2 "  GitHub only ever hands you the private key, at App-key creation time."
+  exit 1
+fi
+
+# The org is read separately: when it is missing we want to die with the list of
+# installations this App can actually see, which needs the JWT — so a `--check`
+# run reports it as a plain missing file and the minting paths report it below.
+ORG=""
+if [[ -e "$CRED_DIR/org" ]]; then
+  ORG="$(read_cred org "Org login")" || exit 1
+  ORG="${ORG//[[:space:]]/}"
+fi
+
+# --- --check: diagnose the credential directory, no network, no token ----------
+if [[ "$MODE" == check ]]; then
+  keycheck="$(printf '%s\n' "$PEM" | openssl rsa -noout -check 2>&1)" \
+    || die "app.pem is not a usable RSA private key: $keycheck"
+  fp="$(printf '%s\n' "$PEM" | openssl rsa -pubout -outform DER 2>/dev/null \
+        | openssl dgst -sha256 -binary | openssl base64 -A)"
+  print -r -- "app        : $APP"
+  print -r -- "dir        : $CRED_DIR (mode $(stat -f '%OLp' "$CRED_DIR"))"
+  print -r -- "app-id     : $APP_ID (mode $(stat -f '%OLp' "$CRED_DIR/app-id"))"
+  if [[ -n "$ORG" ]]; then
+    print -r -- "org        : $ORG (mode $(stat -f '%OLp' "$CRED_DIR/org"))"
+  else
+    print -r -- "org        : MISSING — run: echo <org> > $CRED_DIR/org && chmod 600 $CRED_DIR/org"
+  fi
+  print -r -- "app.pem    : $keycheck (mode $(stat -f '%OLp' "$CRED_DIR/app.pem"))"
+  print -r -- "public key : SHA256:$fp"
+  print -r -- "            (compare with the App's key fingerprint on its settings page)"
+  print -r -- "no network call was made and no token was minted."
+  [[ -n "$ORG" ]] || exit 1
+  exit 0
+fi
+
+# --- build the RS256 JWT (max 10-minute window per GitHub docs) ----------------
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '=' }
+
+now=$(date +%s)
+header='{"alg":"RS256","typ":"JWT"}'
+payload="{\"iat\":$((now - 60)),\"exp\":$((now + 540)),\"iss\":\"$APP_ID\"}"
+
+signing_input="$(printf '%s' "$header" | b64url).$(printf '%s' "$payload" | b64url)"
+
+# The key is passed through a process-substitution FIFO, never a regular file:
+# openssl needs a path for -sign and cannot take the key on stdin.
+signature="$(printf '%s' "$signing_input" \
+  | openssl dgst -sha256 -sign <(printf '%s\n' "$PEM") -binary \
+  | b64url)" || die "JWT signing failed — is $CRED_DIR/app.pem a valid RSA key?"
+
+JWT="${signing_input}.${signature}"
+unset PEM
+
+api() {
+  curl -sS --fail-with-body --max-time 20 \
+    -H "Authorization: Bearer $JWT" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" "$@"
+}
+
+# --- resolve the installation for the org -------------------------------------
+installations="$(api https://api.github.com/app/installations)" \
+  || die "GitHub rejected the JWT (check App ID / key pairing)" 2
+
+seen_accounts() {
+  print -r -- "$installations" | jq -r '.[] | "  " + (.account.login // "?") + " (installation " + (.id|tostring) + ")"'
+}
+
+if [[ -z "$ORG" ]]; then
+  print -u2 "multiplai-gh-token: missing org file: $CRED_DIR/org"
+  print -u2 "  this App is installed on:"
+  seen_accounts >&2
+  print -u2 "  fix: echo <org> > $CRED_DIR/org && chmod 600 $CRED_DIR/org"
+  exit 1
+fi
+
+INSTALL_ID="$(print -r -- "$installations" \
+  | jq -r --arg org "$ORG" 'map(select(.account.login == $org)) | .[0].id // empty')"
+if [[ -z "$INSTALL_ID" ]]; then
+  print -u2 "multiplai-gh-token: App '$APP' is not installed on '$ORG'"
+  print -u2 "  it is installed on:"
+  seen_accounts >&2
+  exit 2
+fi
+
+# --- mint the installation token ----------------------------------------------
+# The POST carries NO body: the token gets exactly what the App installation
+# grants. Down-scoping (repositories/permissions) belongs in the host-side
+# profile if it is ever wanted, never in client argv.
+response="$(api -X POST \
+  "https://api.github.com/app/installations/${INSTALL_ID}/access_tokens")" \
+  || die "token mint failed" 2
+
+TOKEN="$(print -r -- "$response" | jq -r '.token // empty')"
+EXPIRES="$(print -r -- "$response" | jq -r '.expires_at // "unknown"')"
+[[ -n "$TOKEN" ]] || die "response contained no token" 2
+
+# --- audit every mint ---------------------------------------------------------
+# `app=` is what makes a multi-app log readable: one line tells you which
+# identity was minted, for whom, and from where.
+printf '%s\tapp=%s\tinstall=%s\texpires=%s\tclient=%s\tcmd=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APP" "$INSTALL_ID" "$EXPIRES" \
+  "${SSH_CLIENT:-local}" "${SSH_ORIGINAL_COMMAND:-interactive}" >> "$LOG"
+chmod 600 "$LOG" 2>/dev/null || true
+
+if [[ "$MODE" == json ]]; then
+  print -r -- "$response"
+else
+  print -u2 "expires_at: $EXPIRES"
+  print -r -- "$TOKEN"
+fi

@@ -65,7 +65,10 @@ for the per-skill table.
 ### macOS host bridge (optional)
 
 The bridge lets container skills run Mac-only tools (Xcode builds,
-mlx-whisper, driving Chrome via `ab`) over a key-restricted SSH gateway.
+mlx-whisper, driving Chrome via `ab`) over a key-restricted SSH gateway. It
+also provides `multiplai-gh-token`, which mints a 1-hour **GitHub App
+installation token** on the host so the App's private key never enters a
+container — see [docs/gh-app-token.md](docs/gh-app-token.md).
 
 > **Security — enable only for containers you trust.** The gateway is an
 > allowlist, but the tools it allows are powerful *by design*: `swift
@@ -118,6 +121,8 @@ Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 | `build.sh` | Builds the image from `.env` config (kit root `.env`, or one next to this script) |
 | `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac |
 | `md2pdf` | Markdown→PDF wrapper baked into the image (`pandoc --pdf-engine=typst`) |
+| `multiplai-gh-token` | Host-side minter for GitHub App installation tokens — the App key stays on the Mac, the container gets a 1-hour token over the bridge (setup: [docs/gh-app-token.md](docs/gh-app-token.md)) |
+| `docs/gh-app-token.md` | Host setup for `multiplai-gh-token`: per-app credential layout, threat model, transcript hygiene, migration |
 | `release.sh` | Maintainer release tool — build- and changelog-gated tag + kit pin bump (see [CLAUDE.md](CLAUDE.md)) |
 | `tests/gateway-test.sh` | ALLOW/DENY harness exercising the gateway's forced-command allowlist |
 | `venv-sync-entrypoint.sh` | Entrypoint — syncs the Linux venv, then execs `claude` (or bash) |

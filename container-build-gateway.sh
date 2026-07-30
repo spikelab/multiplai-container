@@ -163,6 +163,40 @@ case "$c1" in
       *) deny "pkill target not allowed: ${target:-<none>}" ;;
     esac
     ;;
+  multiplai-gh-token)
+    # Mints a 1-hour GitHub App installation token on the host; the App private
+    # key never leaves the Mac. At most two arguments: an optional leading flag
+    # (--json or --check) plus the app-profile name.
+    #   --json  is REQUIRED by the container side: gh-tok caches .token together
+    #           with .expires_at so it can decide at call time whether to re-mint.
+    #           It exposes no secret the bare form doesn't; transcript hygiene
+    #           comes from gh-tok redirecting into a mode-600 file, not from
+    #           hiding a flag any caller could sidestep by dropping it.
+    #   --check is a no-network credential diagnostic that prints no token.
+    (( ${#words} <= 3 )) || deny "multiplai-gh-token takes at most 2 arguments"
+    i=2; napp=0
+    while (( i <= ${#words} )); do
+      w="${words[i]}"
+      if [[ "$w" == (--check|--json) ]]; then
+        (( i == 2 )) || deny "multiplai-gh-token: flag must come first"
+      elif [[ "$w" == -* ]]; then
+        deny "multiplai-gh-token flag not allowed: $w"
+      else
+        (( napp == 0 )) || deny "multiplai-gh-token: single app name only"
+        [[ "${w//[A-Za-z0-9._-]/}" == "" && "$w" == [A-Za-z0-9]* ]] \
+          || deny "multiplai-gh-token: invalid app name: $w"
+        napp=1
+      fi
+      (( i++ ))
+    done
+    # ~/.local/bin is NOT on the login PATH the gateway's `zsh -lc` resolves
+    # through, so pin argv[0] to the absolute install path rather than making
+    # the verb depend on the user's shell profile. This substitutes a HOST-SIDE
+    # CONSTANT for argv[0] — no client string is re-parsed by a shell, so the
+    # gateway's invariant (argv travels as data) is untouched.
+    words[1]="$HOME/.local/bin/multiplai-gh-token"
+    allow=1
+    ;;
   curl)
     # Loopback-only URLs (checked below) plus a flag allowlist: reject any flag
     # that could write/read host files or reach a non-URL transport

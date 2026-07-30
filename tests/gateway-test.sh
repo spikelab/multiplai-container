@@ -40,6 +40,18 @@ chmod +x "$STUB/xcsift"
 # The gateway's final stage execs `zsh -lc`, resolved via PATH.
 ln -s "$ZSH_BIN" "$STUB/zsh"
 
+# multiplai-gh-token is the one verb whose branch REWRITES argv[0] to an absolute
+# host path ($HOME/.local/bin/...), because ~/.local/bin is not on the login PATH.
+# So the stub has to live there — not on $STUB — and it echoes $0 so a test can
+# prove the rewrite happened rather than trusting it.
+mkdir -p "$FAKE_HOME/.local/bin"
+cat > "$FAKE_HOME/.local/bin/multiplai-gh-token" <<'EOF'
+#!/usr/bin/env bash
+echo "STUB:multiplai-gh-token argv0=$0 cwd=$PWD"
+for a in "$@"; do echo "ARG:[$a]"; done
+EOF
+chmod +x "$FAKE_HOME/.local/bin/multiplai-gh-token"
+
 # Dirs exercising the cd prefix.
 mkdir -p "$TMP/gw test dir" "$TMP/gw (paren) dir" "$TMP/plain"
 
@@ -102,6 +114,25 @@ expect_deny  "xcsift on curl"       'curl http://localhost:8000/ 2>&1 | xcsift -
 expect_deny  "double xcsift suffix" 'swift build 2>&1 | xcsift --format toon --quiet 2>&1 | xcsift --format toon --quiet' "metacharacter"
 expect_deny  "trailing cmd after xcsift suffix" 'swift build 2>&1 | xcsift --format toon --quiet; rm -rf /tmp/x' "metacharacter"
 expect_deny  "near-miss suffix (extra flag)" 'swift build 2>&1 | xcsift --format json --quiet' "metacharacter"
+
+echo "# multiplai-gh-token: at most a leading --json/--check plus one app name"
+expect_allow "gh-token bare"          'multiplai-gh-token'                 "STUB:multiplai-gh-token"
+expect_allow "gh-token app"           'multiplai-gh-token myapp'           "ARG:[myapp]"
+expect_allow "gh-token --check app"   'multiplai-gh-token --check myapp'   "ARG:[--check]"
+expect_allow "gh-token --json app"    'multiplai-gh-token --json myapp'    "ARG:[--json]"
+# The branch pins argv[0] to the absolute install path: the verb must not depend
+# on ~/.local/bin being on the login PATH (it isn't).
+expect_allow "gh-token runs from the absolute install path" \
+  'multiplai-gh-token myapp' "argv0=$FAKE_HOME/.local/bin/multiplai-gh-token"
+expect_deny  "gh-token path traversal as app name" \
+  'multiplai-gh-token ../../etc/passwd'          "invalid app name"
+expect_deny  "gh-token unknown short flag"    'multiplai-gh-token -x'      "flag not allowed"
+expect_deny  "gh-token unknown long flag"     'multiplai-gh-token --exec'  "flag not allowed"
+expect_deny  "gh-token too many arguments"    'multiplai-gh-token a b c'   "at most 2 arguments"
+expect_deny  "gh-token flag after app name"   'multiplai-gh-token myapp --check' "flag must come first"
+expect_deny  "gh-token metacharacter chain"   'multiplai-gh-token myapp; rm -rf /tmp/x' "metacharacter"
+expect_deny  "gh-token via xcsift pipe" \
+  'multiplai-gh-token 2>&1 | xcsift --format toon --quiet' "xcsift pipe only allowed"
 
 echo
 echo "gateway-test: $PASS passed, $FAIL failed"

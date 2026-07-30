@@ -31,6 +31,14 @@ gateway is a strict allowlist, but the tools it allows are powerful *by design*:
   through it. (Navigation to `file:` URLs is blocked, and `curl` is restricted
   to http/https on loopback with a flag allowlist, precisely because these are
   the exfiltration paths. Treat those as hardening, not as a boundary.)
+- `multiplai-gh-token` lets the container **mint a GitHub App installation
+  token** whenever the host holds that App's private key. That is the feature,
+  not a leak: minting is precisely what the verb authorises. The mitigation is
+  the shape of the credential — the key never leaves the Mac, the token lasts
+  one hour and carries only what the App *installation* grants, every mint is
+  logged to `~/.local/state/multiplai-gh-token/mint.log`, and revocation is
+  removing the SSH key or uninstalling the App. Don't install an App key for an
+  org you would not let the container write to.
 
 So: **enabling the bridge grants the container the ability to run host-side code
 and read host files** — it is not "a locked-down SSH shell". Enable it only for
