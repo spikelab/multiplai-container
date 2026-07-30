@@ -18,6 +18,27 @@ sandboxed Claude Code container) and predates this changelog.
 
 ### Added
 
+- `multiplai-gh-token` — host-side minter for **GitHub App installation
+  tokens**. Several Apps live side by side as named profiles under
+  `~/.local/state/multiplai-gh-token/<app>/{app-id,app.pem,org}`; the App's
+  private key never enters a container, which receives only a 1-hour `ghs_`
+  token over the SSH bridge. Modes are enforced (700 dir, 600 files, no
+  symlinks), every mint is audited to `mint.log`, and `--check` diagnoses a
+  credential directory with **no network call and no token printed** — the
+  form that is safe inside an agent transcript. Consumed by the kit's
+  `GH_TOKEN_APP` mode; setup in `docs/gh-app-token.md`.
+- Gateway allowlist branch for `multiplai-gh-token`: at most a leading
+  `--json`/`--check` plus one app name, name validated against
+  `[A-Za-z0-9._-]`, every other flag rejected, argv[0] pinned to
+  `$HOME/.local/bin/multiplai-gh-token` (`~/.local/bin` is not on the login
+  PATH the gateway resolves through). Twelve ALLOW/DENY cases in
+  `tests/gateway-test.sh` cover it, including the argv[0] rewrite.
+- `docs/gh-app-token.md` — host setup guide: creating and installing the App,
+  the credential layout and permission recipe, the threat-model table, the
+  settled Keychain / Secure-Enclave / 1Password rulings, transcript hygiene
+  plus the self-revoke recipe, the audit log, and migration from the
+  single-App predecessor `dolce-gh-token`.
+
 - `CHANGELOG.md` (this file), backfilled for every existing tag, so a consumer
   can see what advancing `CONTAINER_REF` actually gets them.
 - `SECURITY.md` — threat model of the optional macOS host bridge, supported
