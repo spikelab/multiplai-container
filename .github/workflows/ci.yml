@@ -42,7 +42,8 @@ jobs:
         run: |
           for f in build.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
                    apple-containers-experiment.sh tests/gateway-test.sh \
-                   git-hooks/dispatch tests/git-hooks-test.sh; do
+                   git-hooks/dispatch git-hooks/check-hookspath \
+                   tests/git-hooks-test.sh; do
             echo "== $f"
             bash -n "$f"
           done
@@ -74,22 +75,29 @@ jobs:
       - name: shellcheck
         run: |
           shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf \
-                     git-hooks/dispatch tests/git-hooks-test.sh
+                     git-hooks/dispatch git-hooks/check-hookspath \
+                     tests/git-hooks-test.sh
 
   git-hooks-tests:
     name: git hook secret-gate harness
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Pinned to the same version the Dockerfile installs, so CI cannot pass
-      # against a ruleset the image never runs. Bump both together.
-      - name: Install gitleaks (must match Dockerfile GITLEAKS_VERSION)
+      # Pinned to the same version AND checksum the Dockerfile installs, so CI
+      # cannot pass against a binary the image never runs — and a re-tagged
+      # release asset fails here the same way it fails the image build. Bump
+      # version and SHA256 args together.
+      - name: Install gitleaks (must match Dockerfile GITLEAKS_VERSION + SHA256)
         run: |
           ver="$(grep -oP 'ARG GITLEAKS_VERSION=\K[0-9.]+' Dockerfile)"
           test -n "$ver" || { echo "could not read GITLEAKS_VERSION"; exit 1; }
+          sha="$(grep -oP 'ARG GITLEAKS_SHA256_X64=\K[0-9a-f]{64}' Dockerfile)"
+          test -n "$sha" || { echo "could not read GITLEAKS_SHA256_X64"; exit 1; }
           echo "installing gitleaks $ver"
-          curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz" \
-            | sudo tar xz -C /usr/local/bin gitleaks
+          curl -fsSL -o gitleaks.tgz "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/gitleaks_${ver}_linux_x64.tar.gz"
+          echo "${sha}  gitleaks.tgz" | sha256sum -c -
+          sudo tar xzf gitleaks.tgz -C /usr/local/bin gitleaks
+          rm gitleaks.tgz
           gitleaks version
       - name: tests/git-hooks-test.sh
         run: ./tests/git-hooks-test.sh

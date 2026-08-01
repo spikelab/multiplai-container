@@ -70,6 +70,19 @@ inside the container. Two invariants to preserve:
 - **Keep chaining to `.git/hooks/<name>`.** `core.hooksPath` *replaces*
   `.git/hooks`; it is not additive. Any hook name missing from the symlink loop
   in the Dockerfile is a repo-local hook silently disabled.
+- **Never hand gitleaks a range you haven't proven walkable.** gitleaks exits
+  0 when its underlying `git log` fails, so an invalid revision range scans
+  nothing and passes — the dispatcher `git rev-list`-validates every pre-push
+  range and fails closed on an unwalkable one. Keep that ordering.
+- **The gate is system-level, and local config outranks it.** A repo-local
+  `core.hooksPath` (husky/lefthook installs) bypasses the gate for that repo;
+  that cannot be prevented from `/etc/gitconfig`. The compensating control is
+  `git-hooks/check-hookspath`, which the entrypoint runs to warn (never
+  block). Don't claim the gate is unbypassable in docs.
+
+When bumping `GITLEAKS_VERSION`, also update `GITLEAKS_SHA256_X64` /
+`GITLEAKS_SHA256_ARM64` from upstream's `gitleaks_<ver>_checksums.txt` release
+asset — the build and CI both verify the tarball against them.
 
 `git-hooks/gitleaks.toml` is gitleaks' default ruleset plus what it
 demonstrably misses — chiefly the `sk-ant-*` family (Anthropic API keys, Claude

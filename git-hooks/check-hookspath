@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# check-hookspath — warn about repos that locally override core.hooksPath.
+#
+# The container gates every repo through the SYSTEM-level core.hooksPath
+# (/etc/gitconfig → git-hooks/dispatch). Git's config precedence means a
+# repo-local `core.hooksPath` — what husky/lefthook-style installs write —
+# outranks it, silently un-gating that repo's commits and pushes. That
+# precedence fight cannot be won from system config, so this script is the
+# compensating control: scan the workspace, name the un-gated repos, and let
+# a human decide. It is a WARNING, never a blocker — local hooksPath has
+# legitimate uses (this repo's own test harness, for one), and blocking
+# container start over it would be a denial-of-service on the workspace.
+#
+# Usage: check-hookspath [ROOT]     (default ROOT: $WORKSPACE)
+#
+# Always exits 0. Output goes to stderr, only when something is found.
+#
+# Scope: working checkouts only (`.git` directories and worktree/submodule
+# `.git` files). Bare repos (`*.git`) are not scanned — nothing commits from
+# inside a bare repo, and the receive-side hooks it runs resolve through the
+# same system hooksPath. Depth-bounded and dependency-dir-pruned so a large
+# bind-mounted workspace stays cheap to scan at container start.
+set -uo pipefail
+
+root="${1:-${WORKSPACE:-}}"
+{ [ -n "$root" ] && [ -d "$root" ]; } || exit 0
+
+found=0
+while IFS= read -r gitpath; do
+    repo="${gitpath%/.git}"
+    # For a worktree/submodule `.git` FILE, --local resolves to the shared
+    # repository config, which is exactly the file that would carry the
+    # override. `git config` exits 1 when the key is unset.
+    hp="$(git -C "$repo" config --local --get core.hooksPath 2>/dev/null)" || continue
+    [ -n "$hp" ] || continue
+    if [ "$found" -eq 0 ]; then
+        printf '%s\n' \
+            "secret-scan: WARNING — repos below set a repo-local core.hooksPath." \
+            "  Local config outranks the container-wide gitleaks gate, so commits" \
+            "  and pushes in these repos are NOT scanned for secrets:" >&2
+        found=1
+    fi
+    printf '  %s  (core.hooksPath = %s)\n' "$repo" "$hp" >&2
+done < <(find "$root" -maxdepth 5 \
+            \( -name node_modules -o -name .venv -o -name venv \) -prune \
+            -o -name .git -print 2>/dev/null)
+
+if [ "$found" -eq 1 ]; then
+    printf '%s\n' \
+        "  To restore the gate for a repo:" \
+        "    git -C <repo> config --unset core.hooksPath" >&2
+fi
+exit 0

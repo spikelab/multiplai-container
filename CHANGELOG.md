@@ -19,22 +19,39 @@ sandboxed Claude Code container) and predates this changelog.
 ### Added
 
 - **Container-wide secret-leak gate.** `git-hooks/dispatch` is installed as
-  every git hook via `core.hooksPath` in `/etc/gitconfig`, so *every*
-  repository touched inside the container is gated with no per-repo setup and
-  nothing to forget on a fresh clone. `pre-commit` scans the staged diff
-  (blocking before a commit object exists); `pre-push` scans the range being
-  pushed, which is the backstop for `--no-verify` and for commits made outside
-  the container, and the only secret gate private repos get — GitHub's free
-  secret scanning and push protection cover public repos only. Findings are
-  always `--redact`ed, so a leak report never echoes the credential into
-  scrollback, CI logs, or an agent transcript. Bypass is `--no-verify` and
-  nothing else: there is deliberately no env-var skip, which an agent could
-  take on its own mid-task.
+  every git hook via `core.hooksPath` in `/etc/gitconfig`, so every
+  repository touched inside the container is gated by default, with no
+  per-repo setup and nothing to forget on a fresh clone. `pre-commit` scans
+  the staged diff (blocking before a commit object exists); `pre-push` scans
+  the range being pushed, which is the backstop for `--no-verify` and for
+  commits made outside the container, and the only secret gate private repos
+  get — GitHub's free secret scanning and push protection cover public repos
+  only. Findings are always `--redact`ed, so a leak report never echoes the
+  credential into scrollback, CI logs, or an agent transcript. The dispatcher
+  itself offers exactly one bypass, `--no-verify`: there is deliberately no
+  env-var skip, which an agent could take on its own mid-task. One caveat is
+  inherent to git's config precedence and is NOT covered by the gate: a
+  repo-local `core.hooksPath` (what husky/lefthook-style installs write),
+  `git -c core.hooksPath=…`, or `GIT_CONFIG_NOSYSTEM=1` outranks system
+  config and un-gates that repo — the container entrypoint runs
+  `git-hooks/check-hookspath` at start to *warn* (never block) about
+  workspace repos with such an override.
+  The `pre-push` range construction fails **closed**: when the remote tip
+  being replaced is absent from the local odb (typical after the history
+  rewrite + force-push the leak banner itself recommends), the scan falls
+  back to everything no remote-tracking ref already has, and a range git
+  cannot walk at all aborts the push with an explicit scan-error message —
+  gitleaks 8.29.0 exits 0 on an invalid range, so an unvalidated range would
+  silently scan nothing.
   Repo-local hooks are preserved: `core.hooksPath` *replaces* `.git/hooks`
   rather than adding to it, so the dispatcher chains to each repository's own
-  hook of the same name (replaying `pre-push` stdin ref lines verbatim). Without
-  that delegation, installing this gate would have silently disabled every
-  existing per-repo hook — trading one control for another is not a net gain.
+  hook of the same name (replaying `pre-push` stdin ref lines verbatim, and
+  handing EOF through when there is nothing to replay). Receive-side hook
+  names (`pre-receive`, `update`, `post-receive`, `post-update`,
+  `proc-receive`, `push-to-checkout`, `fsmonitor-watchman`) are symlinked
+  too, so bare-repo hooks still chain. Without that delegation, installing
+  this gate would have silently disabled every existing per-repo hook —
+  trading one control for another is not a net gain.
 - `git-hooks/gitleaks.toml` — the ruleset the hooks enforce: gitleaks' defaults
   (`useDefault = true`) plus the patterns those defaults **verifiably miss**.
   Tested against gitleaks 8.29.0, which returns "no leaks found" for
@@ -46,13 +63,25 @@ sandboxed Claude Code container) and predates this changelog.
   Complements `multiplai-gh-token`'s transcript hygiene from v0.7: that keeps a
   minted `ghs_` token from being printed, this keeps any credential from being
   committed.
-- `gitleaks` 8.29.0 in the image (`GITLEAKS_VERSION`), backing the above.
-- `tests/git-hooks-test.sh` — 19 assertions over throwaway repos: detection and
+- `gitleaks` 8.29.0 in the image (`GITLEAKS_VERSION`), backing the above. The
+  release tarball is now pinned by per-arch SHA256
+  (`GITLEAKS_SHA256_X64`/`_ARM64`, from upstream's checksums asset) and
+  verified with `sha256sum -c` before extraction — a re-tagged release asset
+  or CDN compromise fails the build instead of going undetected. Bump the
+  SHA args together with `GITLEAKS_VERSION`.
+- `git-hooks/check-hookspath` — warn-only drift check run by the entrypoint:
+  scans `$WORKSPACE` for repos whose *local* `core.hooksPath` overrides (and
+  therefore bypasses) the container-wide gate, and names them at container
+  start.
+- `tests/git-hooks-test.sh` — 25 assertions over throwaway repos: detection and
   redaction on commit and push, the new-branch (`remote_sha` all-zeros) push
-  range, placeholder URLs staying quiet, and both fail-closed paths (missing
-  binary, missing ruleset — neither may silently fall back to upstream
-  defaults). Wired into CI, which reads `GITLEAKS_VERSION` straight out of the
-  Dockerfile so the tested and shipped rulesets cannot drift.
+  range, the stale-clone force-push regression (unknown remote tip must still
+  be scanned; an unwalkable range must fail closed as a scan error),
+  empty-stdin replay as EOF, the `check-hookspath` drift warning, placeholder
+  URLs staying quiet, and both fail-closed paths (missing binary, missing
+  ruleset — neither may silently fall back to upstream defaults). Wired into
+  CI, which reads `GITLEAKS_VERSION` and `GITLEAKS_SHA256_X64` straight out
+  of the Dockerfile so the tested and shipped binaries cannot drift.
 
 ## [0.7] – 2026-07-30
 

@@ -18,6 +18,11 @@
 #   * the dispatcher does not exec itself (hooksPath must not be resolved via
 #     `git rev-parse --git-path hooks`)
 #   * a missing gitleaks binary fails CLOSED
+#   * a force-push whose replaced remote tip is absent from the local odb is
+#     still scanned (gitleaks exits 0 on an invalid range — the fail-open this
+#     pins), and a range that cannot be walked at all fails CLOSED as a scan
+#     error, not a clean scan
+#   * check-hookspath flags repos overriding core.hooksPath locally, warn-only
 #
 # Requirements: git and gitleaks on PATH. Override the binary with
 # GITLEAKS_BIN=/path/to/gitleaks.
@@ -234,6 +239,107 @@ fi
 git -C "$R2" checkout -q -b archive/private
 run git -C "$R2" push -q origin archive/private
 fail_if "repo-local pre-push can still veto (archive/* guard)"
+
+# Empty stdin (git normally skips pre-push when nothing is pushed, but be
+# strict): the repo-local hook must receive EOF, not one blank ref line.
+# Invoke the dispatcher directly — real git cannot produce this case.
+R3="$(new_repo emptystdin)"
+cat > "$R3/.git/hooks/pre-push" <<'EOF'
+#!/bin/sh
+if IFS= read -r line; then
+  echo "GOT-A-LINE:$line"
+  exit 1
+fi
+exit 0
+EOF
+chmod +x "$R3/.git/hooks/pre-push"
+OUT="$(cd "$R3" && "$HOOKS/pre-push" origin "$REMOTE" </dev/null 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" != *GOT-A-LINE* ]]; then
+    ok "empty pre-push stdin replays as EOF, not a blank line"
+else
+    bad "empty pre-push stdin replays as EOF, not a blank line"
+fi
+
+echo "== pre-push fail-open regression (stale clone + force-push)"
+
+# The blocker this pins: gitleaks 8.29.0 exits 0 when its underlying `git log`
+# fails on an invalid revision range — it scans NOTHING and passes. The range
+# "$remote_sha..$local_sha" is invalid exactly when the remote tip is absent
+# from the local odb, i.e. after the history rewrite + force-push the leak
+# banner itself recommends, done from a clone that never fetched that tip.
+REMOTE2="$TMP/remote2.git"; git init -q --bare -b main "$REMOTE2"
+
+# Seed the remote from one clone… (2>/dev/null: the empty-repo clone warning
+# is expected and noise here)
+SEED="$TMP/seed"; git clone -q "$REMOTE2" "$SEED" 2>/dev/null
+git -C "$SEED" config user.email test@example.com
+git -C "$SEED" config user.name  "Hook Test"
+git -C "$SEED" config commit.gpgsign false
+printf 'hello\n' > "$SEED/README.md"
+git -C "$SEED" add README.md
+git -C "$SEED" -c core.hooksPath=/dev/null commit -qm init
+git -C "$SEED" -c core.hooksPath=/dev/null push -q origin main
+
+# …take a second clone, which will go stale…
+STALE="$TMP/stale"; git clone -q "$REMOTE2" "$STALE"
+git -C "$STALE" config user.email test@example.com
+git -C "$STALE" config user.name  "Hook Test"
+git -C "$STALE" config commit.gpgsign false
+git -C "$STALE" config core.hooksPath "$HOOKS"
+
+# …advance the remote from the seed clone (a commit the stale clone never
+# fetches)…
+printf 'more\n' >> "$SEED/README.md"
+git -C "$SEED" -c core.hooksPath=/dev/null commit -qam advance
+git -C "$SEED" -c core.hooksPath=/dev/null push -q origin main
+
+# …then commit a secret in the stale clone and force-push. remote_sha is
+# unknown locally; the dispatcher must fall back to a walkable range and
+# still block.
+printf 'aws_key = "%s"\n' "$SECRET" > "$STALE/leak.py"
+git -C "$STALE" add leak.py
+git -C "$STALE" commit -qm "rewritten" --no-verify >/dev/null 2>&1
+run git -C "$STALE" push -q --force origin main
+fail_if "force-push with unknown remote tip still scans (stale clone)"
+run git -C "$REMOTE2" log --all --oneline
+case "$OUT" in *rewritten*) bad "the secret never reached the remote";; *) ok "the secret never reached the remote";; esac
+
+# When even the fallback range cannot be walked (here: a remote-tracking ref
+# whose object does not exist locally), the push must fail CLOSED with an
+# explicit scan-error message — not sail through unscanned, and not claim a
+# finding.
+BROKEN="$(new_repo brokenremote)"
+git -C "$BROKEN" remote add origin "$REMOTE"
+mkdir -p "$BROKEN/.git/refs/remotes/origin"
+printf '%s\n' "0123456789abcdef0123456789abcdef01234567" > "$BROKEN/.git/refs/remotes/origin/bogus"
+git -C "$BROKEN" checkout -q -b broken-branch
+run git -C "$BROKEN" push -q origin broken-branch
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *"SCAN ERROR"* ]]; then
+    ok "unwalkable range fails closed as a scan error (not a finding)"
+else
+    bad "unwalkable range fails closed as a scan error (not a finding)"
+fi
+
+echo "== hooksPath drift warning (check-hookspath)"
+
+CHECK="$HERE/../git-hooks/check-hookspath"
+D="$TMP/drift-clean"; mkdir -p "$D"
+git init -q "$D/plain-repo"
+OUT="$("$CHECK" "$D" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
+    ok "repos without a local hooksPath stay silent"
+else
+    bad "repos without a local hooksPath stay silent"
+fi
+
+# Every harness repo sets core.hooksPath locally (that is how the dispatcher
+# gets wired in), so the scratch dir is a ready-made drift fixture.
+OUT="$("$CHECK" "$TMP" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *core.hooksPath* ]]; then
+    ok "local hooksPath overrides are flagged, warn-only (rc 0)"
+else
+    bad "local hooksPath overrides are flagged, warn-only (rc 0)"
+fi
 
 echo "== fail-closed"
 

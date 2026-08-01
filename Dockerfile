@@ -17,6 +17,12 @@ ARG RUST_TOOLCHAIN=1.96.1
 ARG PANDOC_VERSION=3.9
 ARG TYPST_VERSION=0.15.0
 ARG GITLEAKS_VERSION=8.29.0
+# Per-arch SHA256 of the gitleaks release tarballs, from upstream's
+# gitleaks_<version>_checksums.txt release asset. Bump together with
+# GITLEAKS_VERSION — the build verifies before extraction, and CI greps
+# GITLEAKS_SHA256_X64 out of this file for its own install.
+ARG GITLEAKS_SHA256_X64=39e07ad810336fd0ae80d0bd61c60d0521f628173e7583583b5df4a38738522c
+ARG GITLEAKS_SHA256_ARM64=4c811a7c23296c7163ebab166ec67cd8a31eb9922caf06a7cac4d6dd872e4159
 
 # --- All apt packages in one layer, single cache cleanup ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -116,10 +122,20 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
 # gitleaks — secret scanner backing the container-wide git hooks below.
 # Release assets name the architecture x64/arm64, not amd64/arm64, so the dpkg
 # arch needs mapping. Static Go binary, no runtime deps.
+# The tarball is verified against its pinned SHA256 before extraction: this
+# binary runs on every commit and push in every repo, so a re-tagged release
+# asset or a CDN compromise must fail the build, not go undetected.
 RUN ARCH=$(dpkg --print-architecture) \
-    && GL_ARCH=$([ "$ARCH" = "arm64" ] && echo arm64 || echo x64) \
-    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
-        | tar xz -C /usr/local/bin gitleaks \
+    && if [ "$ARCH" = "arm64" ]; then \
+           GL_ARCH=arm64; GL_SHA256="${GITLEAKS_SHA256_ARM64}"; \
+       else \
+           GL_ARCH=x64; GL_SHA256="${GITLEAKS_SHA256_X64}"; \
+       fi \
+    && curl -fsSL -o /tmp/gitleaks.tgz \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GL_ARCH}.tar.gz" \
+    && echo "${GL_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c - \
+    && tar xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks \
+    && rm /tmp/gitleaks.tgz \
     && chmod +x /usr/local/bin/gitleaks \
     && gitleaks version
 
@@ -133,19 +149,30 @@ RUN ARCH=$(dpkg --print-architecture) \
 # One dispatcher, symlinked under each hook name. The names matter: hooksPath
 # REPLACES .git/hooks entirely, so any hook name NOT present here is a
 # repo-local hook silently disabled. The dispatcher chains to the repo's own
-# hook, so listing a name preserves it.
+# hook, so listing a name preserves it. The receive-side names (pre-receive,
+# update, post-receive, post-update, proc-receive) cover bare repos — system
+# hooksPath applies there too, so a local bare remote's own vetoing
+# pre-receive must still chain. push-to-checkout and fsmonitor-watchman get
+# absent-hook special cases in the dispatcher (their mere presence changes
+# git's behaviour, so a silent exit 0 would be wrong).
+#
+# check-hookspath is not a hook — it is the entrypoint's drift warning for
+# repos that override core.hooksPath locally (which outranks this gate); it
+# just ships in the same directory.
 #
 # Deliberately omitted: reference-transaction, pre-auto-gc, post-index-change.
 # They fire on essentially every ref update and git housekeeping pass, and
 # paying a process spawn each time is not worth it — no repo in this workspace
 # uses them. Add the name here if one ever does.
-COPY git-hooks/dispatch git-hooks/gitleaks.toml /usr/local/share/git-hooks/
-RUN chmod 755 /usr/local/share/git-hooks/dispatch \
+COPY git-hooks/dispatch git-hooks/check-hookspath git-hooks/gitleaks.toml /usr/local/share/git-hooks/
+RUN chmod 755 /usr/local/share/git-hooks/dispatch /usr/local/share/git-hooks/check-hookspath \
     && chmod 644 /usr/local/share/git-hooks/gitleaks.toml \
     && for h in applypatch-msg pre-applypatch post-applypatch \
                 pre-commit pre-merge-commit prepare-commit-msg commit-msg \
                 post-commit pre-rebase post-checkout post-merge pre-push \
-                post-rewrite sendemail-validate; do \
+                post-rewrite sendemail-validate \
+                pre-receive update post-receive post-update proc-receive \
+                push-to-checkout fsmonitor-watchman; do \
            ln -sf dispatch "/usr/local/share/git-hooks/$h"; \
        done \
     && git config --system core.hooksPath /usr/local/share/git-hooks \

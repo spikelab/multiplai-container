@@ -32,10 +32,19 @@
 # exec straight through, untouched.
 #
 # Escape hatch: `git commit --no-verify` / `git push --no-verify`, and nothing
-# else. There is deliberately no MULTIPLAI_SKIP=1 env var — an env-var bypass
-# is a channel an agent can take on its own, quietly, mid-task. --no-verify is
-# a deliberate act typed by a human, and pre-push still catches what a skipped
-# pre-commit let through.
+# else that this dispatcher provides. There is deliberately no MULTIPLAI_SKIP=1
+# env var — an env-var bypass is a channel an agent can take on its own,
+# quietly, mid-task. --no-verify is a deliberate act typed by a human, and
+# pre-push still catches what a skipped pre-commit let through.
+#
+# Known limit: the gate rides on the SYSTEM-level core.hooksPath, and git's
+# config precedence (system < global < local) means a repo-local
+# `core.hooksPath` — what husky/lefthook-style installs write — as well as
+# `git -c core.hooksPath=…` or GIT_CONFIG_NOSYSTEM=1 outranks it and quietly
+# un-gates that repo. That fight cannot be won from /etc/gitconfig; the
+# compensating control is `check-hookspath` (same directory), which the
+# container entrypoint runs at start to WARN about workspace repos that
+# override hooksPath locally.
 
 set -uo pipefail
 
@@ -118,8 +127,29 @@ scan_staged() {
 # <remote sha>. Scan only what this push would actually add to the remote, so
 # pushing a branch does not re-scan (and re-report) history the remote already
 # has.
+#
+# Range-construction gotchas, all load-bearing:
+#
+#   * gitleaks 8.29.0 exits 0 when its underlying `git log` FAILS — the fatal
+#     is logged as ERR, but the exit code only says "no leaks found". An
+#     invalid revision range therefore scans NOTHING and passes. Every range
+#     must be proven walkable with `git rev-list` BEFORE gitleaks sees it,
+#     and an unwalkable range must fail CLOSED as a scan error.
+#
+#   * `--not --remotes` excludes commits reachable from ANY remote-tracking
+#     ref, not just refs of the remote being pushed to. Pushing history to a
+#     SECOND remote (a fresh mirror, say) therefore skips commits some other
+#     remote already has — accepted: those commits are already burned on the
+#     first remote, and per-remote negation would re-report known history on
+#     every mirror push.
+#
+#   * The first push of a repo with no remote-tracking refs at all scans the
+#     full history reachable from the pushed tip. Unbounded one-time cost,
+#     deliberately accepted: that first push is exactly when an imported
+#     history full of old secrets would otherwise slip out.
 scan_push_range() {
     local input="$1" local_ref local_sha remote_sha range
+    local -a revs
     local zero="0000000000000000000000000000000000000000"
 
     [ -n "$input" ] || return 0
@@ -134,11 +164,42 @@ scan_push_range() {
         if [ "$remote_sha" = "$zero" ]; then
             # New ref on the remote: everything reachable from it that no other
             # remote-tracking ref already has.
-            range="$local_sha --not --remotes"
+            revs=("$local_sha" --not --remotes)
+        elif git rev-parse --verify -q "$remote_sha^{commit}" >/dev/null; then
+            revs=("$remote_sha..$local_sha")
         else
-            range="$remote_sha..$local_sha"
+            # The remote's tip is not in the local odb. Typical route there:
+            # the history rewrite + force-push that this hook's own leak
+            # banner recommends, done from a clone that never fetched the tip
+            # it is replacing. The naive "$remote_sha..$local_sha" would be an
+            # invalid range — which gitleaks treats as a clean scan (see
+            # above) — so scan the wider new-ref range instead.
+            revs=("$local_sha" --not --remotes)
         fi
 
+        # Prove the range is walkable, else fail CLOSED. Without this check a
+        # broken range means gitleaks scans nothing, reports nothing, and the
+        # push sails through unscanned.
+        if ! git rev-list --max-count=0 "${revs[@]}" -- >/dev/null 2>&1; then
+            printf '%s\n' \
+                "" \
+                "============================================================" \
+                " SECRET SCAN: push ($local_ref) — SCAN ERROR, not a finding" \
+                "============================================================" \
+                " Could not build a scannable commit range for this push:" \
+                "   git cannot walk: ${revs[*]}" \
+                "" \
+                " No secret was detected — the range could not be scanned at" \
+                " all, and an unscanned push does not get the benefit of the" \
+                " doubt. Fetch the remote tip first:" \
+                "   git fetch <remote>" \
+                " then push again. Use --no-verify only if you have inspected" \
+                " the outgoing commits by hand." \
+                "============================================================" >&2
+            exit 1
+        fi
+
+        range="${revs[*]}"
         if ! gitleaks git --log-opts "$range" "${GITLEAKS_COMMON[@]}"; then
             leak_banner "push ($local_ref)"
             printf '%s\n' \
@@ -161,12 +222,37 @@ case "$hook_name" in
         push_stdin="$(cat)"
         scan_push_range "$push_stdin"
         if [ -x "$own_hook" ]; then
-            printf '%s\n' "$push_stdin" | "$own_hook" "$@"
+            if [ -n "$push_stdin" ]; then
+                printf '%s\n' "$push_stdin" | "$own_hook" "$@"
+            else
+                # Nothing to replay: hand the hook EOF, as git would have.
+                # `printf '%s\n' ""` would deliver one blank line instead,
+                # which a strict repo-local hook could read as a malformed
+                # ref line.
+                "$own_hook" "$@" </dev/null
+            fi
             exit $?
         fi
         exit 0
         ;;
 esac
+
+# push-to-checkout is the one chained hook whose mere PRESENCE changes git's
+# behaviour: with receive.denyCurrentBranch=updateInstead, git runs the hook
+# INSTEAD of its built-in worktree update, so a silent `exit 0` here would
+# move the ref while leaving the worktree stale. When the repo has no hook of
+# its own, run the documented equivalent of the default (githooks(5)).
+if [ "$hook_name" = "push-to-checkout" ] && [ ! -x "$own_hook" ]; then
+    exec git read-tree -u -m HEAD "$1"
+fi
+
+# fsmonitor-watchman is normally invoked via the core.fsmonitor config path,
+# not hooksPath — but if git ever resolves it here, a bare `exit 0` would
+# mean "nothing changed on disk", silently hiding modifications. Exit
+# non-zero instead: git then falls back to a full working-tree scan.
+if [ "$hook_name" = "fsmonitor-watchman" ] && [ ! -x "$own_hook" ]; then
+    exit 1
+fi
 
 # Every other hook, and pre-commit once it has passed: hand over completely.
 # exec preserves stdin, argv and exit status, so hooks that read stdin
