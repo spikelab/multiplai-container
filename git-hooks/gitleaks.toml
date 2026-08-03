@@ -1,0 +1,58 @@
+# Baseline gitleaks config for the container-wide git hooks.
+#
+# useDefault=true keeps the whole upstream ruleset (~200 provider patterns plus
+# the entropy-based generic-api-key rule) and adds what it verifiably misses.
+#
+# Every rule below was added because it was TESTED against gitleaks 8.29.0
+# defaults and found undetected — not on suspicion. Verified 2026-07-27 with
+# realistic-length values, in .py, in .env, and bare:
+#
+#   sk-ant-api03-<95ch>       -> no leaks found
+#   sk-ant-oat01-<95ch>       -> no leaks found
+#   {"claudeAiOauth":{"accessToken":"sk-ant-oat01-..."}}  -> no leaks found
+#   postgresql://u:pw@host/db -> no leaks found
+#
+# The first three are the highest-value credentials in this environment: the
+# kit mounts the host's ~/.claude/.credentials.json into the container, so an
+# Anthropic OAuth token is present in every session's filesystem. A gate that
+# misses it is not a gate. (knowhere's older hand-rolled pre-commit hook did
+# catch the sk-ant-* family; dropping to bare gitleaks defaults would have been
+# a net downgrade for exactly the secret most likely to leak here.)
+#
+# Escape hatches for false positives, in preference order:
+#   1. a trailing  # gitleaks:allow  comment on the offending line
+#   2. the finding's fingerprint in the repo's .gitleaksignore
+#   3. --no-verify, once you have checked the finding by hand
+# The hooks always pass this file with --config, which outranks a repo-local
+# .gitleaks.toml. That is deliberate: a committed repo config could otherwise
+# silently switch the gate off, and the two mechanisms above already cover the
+# legitimate need without offering that.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "anthropic-key"
+description = "Anthropic API key or Claude OAuth/refresh token (sk-ant-*)"
+# Covers the whole family in one rule so a future prefix is caught by default:
+#   sk-ant-api03-  API keys
+#   sk-ant-oat01-  Claude Code OAuth access tokens
+#   sk-ant-ort01-  Claude Code OAuth refresh tokens
+#   sk-ant-admin01- Admin API keys
+regex = '''sk-ant-[a-z]{2,6}\d{2}-[A-Za-z0-9_-]{24,}'''
+keywords = ["sk-ant-"]
+entropy = 3.0
+
+[[rules]]
+id = "db-url-inline-password"
+description = "Database or broker connection URL with an inline password"
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|clickhouse|mssql)://[^\s:/@]{1,64}:[^\s:/@]{6,}@[^\s/]+'''
+keywords = ["postgres", "postgresql", "mysql", "mariadb", "mongodb", "redis", "amqp", "clickhouse", "mssql"]
+
+  # Documentation and .env.example files are full of these with placeholder
+  # credentials; flagging them trains people to ignore the gate.
+  [rules.allowlist]
+  regexTarget = "match"
+  regexes = [
+    '''://[^\s:/@]+:(?:pass(?:word|wd)?|secret|changeme|placeholder|example|dummy|redacted|your[-_]?\w+|x{3,}|\*{3,}|<[^>]{1,32}>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)@''',
+  ]

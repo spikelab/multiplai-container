@@ -58,6 +58,52 @@ allowlists by command. When widening the allowlist, preserve that invariant
 (strip only known-safe literal wrappers, exec user argv as data). Ship changes
 through `release.sh` like everything else.
 
+## Editing the secret gate (`git-hooks/`)
+
+The image installs `git-hooks/dispatch` as *every* git hook via
+`core.hooksPath` in `/etc/gitconfig`, so it applies to every repo touched
+inside the container. Invariants to preserve:
+
+- **Never resolve the repo's own hooks with `git rev-parse --git-path hooks`.**
+  That honours `core.hooksPath` and returns the dispatcher's own directory —
+  the hook would exec itself forever. Use `--git-dir` and append `/hooks`.
+- **Keep chaining to `.git/hooks/<name>`.** `core.hooksPath` *replaces*
+  `.git/hooks`; it is not additive. Any hook name missing from the symlink loop
+  in the Dockerfile is a repo-local hook silently disabled — which is why
+  `check-hookspath` reads the covered set from the dispatcher symlinks at
+  runtime and warns about repo-local hooks outside it. Add a name to the
+  Dockerfile loop and the check follows automatically; hardcode the list
+  anywhere else and you have reintroduced the drift it exists to catch.
+- **Never hand gitleaks a range you haven't proven walkable.** gitleaks exits
+  0 when its underlying `git log` fails, so an invalid revision range scans
+  nothing and passes — the dispatcher `git rev-list`-validates every pre-push
+  range and fails closed on an unwalkable one. Keep that ordering.
+- **The gate is system-level, and local config outranks it.** A repo-local
+  `core.hooksPath` (husky/lefthook installs) bypasses the gate for that repo;
+  that cannot be prevented from `/etc/gitconfig`. The compensating control is
+  `git-hooks/check-hookspath`, which the entrypoint runs to warn (never
+  block). Don't claim the gate is unbypassable in docs. Note that a repo
+  pointing `core.hooksPath` at its *own* `.git/hooks` — a no-op that looks
+  harmless — un-gates it just as completely; unset it and let the dispatcher
+  chain there instead.
+- **Never chain to a repo hook through a pipe.** Under `pipefail` a hook that
+  exits without draining stdin makes the writer take SIGPIPE past the 64K pipe
+  buffer, and `exit $?` turns that into a push rejected with no message. Use a
+  here-string.
+
+When bumping `GITLEAKS_VERSION`, also update `GITLEAKS_SHA256_X64` /
+`GITLEAKS_SHA256_ARM64` from upstream's `gitleaks_<ver>_checksums.txt` release
+asset — the build and CI both verify the tarball against them.
+
+`git-hooks/gitleaks.toml` is gitleaks' default ruleset plus what it
+demonstrably misses — chiefly the `sk-ant-*` family (Anthropic API keys, Claude
+OAuth access/refresh tokens), which upstream gitleaks **does not detect in any
+form**. That matters here specifically because the kit mounts the host's
+`~/.claude/.credentials.json` into every session. Before trimming a rule, run
+`tests/git-hooks-test.sh` — the `sk-ant-*` case is the canary for the whole
+custom-config path. When bumping `GITLEAKS_VERSION`, re-run that harness (CI
+reads the version straight out of the Dockerfile, so the two cannot drift).
+
 ## Standalone use
 
 The repo works without the kit (`cp .env.example .env`, `./build.sh`). See

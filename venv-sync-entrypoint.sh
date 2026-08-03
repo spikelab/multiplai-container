@@ -128,4 +128,13 @@ if [ -d "$CLI_DIR" ]; then
     fi
 fi
 
+# --- Secret-gate drift warning (never blocks) ---
+# The image gates every repo via core.hooksPath in /etc/gitconfig, but a
+# repo-local core.hooksPath (husky/lefthook-style) outranks system config and
+# silently un-gates that repo. Detection is the compensating control: warn at
+# container start, keep going.
+if [ -x /usr/local/share/git-hooks/check-hookspath ]; then
+    /usr/local/share/git-hooks/check-hookspath "${WORKSPACE:-}" || true
+fi
+
 exec "$@"
