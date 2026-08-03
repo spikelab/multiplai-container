@@ -260,6 +260,26 @@ else
     bad "empty pre-push stdin replays as EOF, not a blank line"
 fi
 
+# Replaying a large ref list to a repo-local hook that never reads stdin. Under
+# `pipefail`, doing this through a pipe makes the writer take SIGPIPE once the
+# payload passes the 64K pipe buffer, and the dispatcher's `exit $?` turns that
+# into 141 — a push rejected with no finding and no message. Deletion lines are
+# used so the scanner skips every ref (nothing is being sent) and the test costs
+# no gitleaks invocations; only the replay path is under test.
+R4="$(new_repo bigpush)"
+cat > "$R4/.git/hooks/pre-push" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$R4/.git/hooks/pre-push"
+BIG_REFS="$(awk 'BEGIN {
+    z = "0000000000000000000000000000000000000000"
+    s = "1111111111111111111111111111111111111111"
+    for (i = 0; i < 800; i++) printf "(delete) %s refs/heads/branch-%04d %s\n", z, i, s
+}')"
+OUT="$(cd "$R4" && printf '%s\n' "$BIG_REFS" | "$HOOKS/pre-push" origin "$REMOTE" 2>&1)"; RC=$?
+pass_if "large ref list replays to a non-reading repo hook without SIGPIPE"
+
 echo "== pre-push fail-open regression (stale clone + force-push)"
 
 # The blocker this pins: gitleaks 8.29.0 exits 0 when its underlying `git log`
@@ -339,6 +359,63 @@ if [ "$RC" -eq 0 ] && [[ "$OUT" == *core.hooksPath* ]]; then
     ok "local hooksPath overrides are flagged, warn-only (rc 0)"
 else
     bad "local hooksPath overrides are flagged, warn-only (rc 0)"
+fi
+
+# Depth. Repos nest deeper than one might guess — a worktree of a sub-project
+# inside a collection repo sits at 6, and this workspace has three of those
+# today. A drift check that cannot see them is a hole in the one compensating
+# control the design admits it needs.
+DEEP="$TMP/deep/a/b/c/d/e/repo"
+mkdir -p "$DEEP"
+git init -q "$DEEP"
+git -C "$DEEP" config core.hooksPath /somewhere/else
+OUT="$("$CHECK" "$TMP/deep" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *"$DEEP"* ]]; then
+    ok "deeply nested repos are still scanned for hooksPath drift"
+else
+    bad "deeply nested repos are still scanned for hooksPath drift"
+fi
+
+echo "== uncovered repo-local hooks (check-hookspath)"
+
+# hooksPath REPLACES .git/hooks, so a repo-local hook whose name the dispatcher
+# does not symlink never runs at all. The covered set is read from the
+# dispatcher's own directory, so $HOOKS (which mirrors the image layout) is the
+# fixture; $CHECK invoked from the source checkout has no symlinks to read.
+cp "$CHECK" "$HOOKS/check-hookspath"; chmod 755 "$HOOKS/check-hookspath"
+
+ORPHAN="$TMP/orphans"; mkdir -p "$ORPHAN"
+git init -q "$ORPHAN/has-orphan"
+printf '#!/bin/sh\nexit 0\n' > "$ORPHAN/has-orphan/.git/hooks/reference-transaction"
+chmod +x "$ORPHAN/has-orphan/.git/hooks/reference-transaction"
+OUT="$("$HOOKS/check-hookspath" "$ORPHAN" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *reference-transaction* ]]; then
+    ok "repo-local hook with an unsymlinked name is flagged as not running"
+else
+    bad "repo-local hook with an unsymlinked name is flagged as not running"
+fi
+
+# ...and a hook the dispatcher does chain must stay quiet, or the warning is
+# noise and gets ignored.
+COVERED="$TMP/covered"; mkdir -p "$COVERED"
+git init -q "$COVERED/has-precommit"
+printf '#!/bin/sh\nexit 0\n' > "$COVERED/has-precommit/.git/hooks/pre-commit"
+chmod +x "$COVERED/has-precommit/.git/hooks/pre-commit"
+OUT="$("$HOOKS/check-hookspath" "$COVERED" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
+    ok "repo-local hook the dispatcher chains is not flagged"
+else
+    bad "repo-local hook the dispatcher chains is not flagged"
+fi
+
+# Run from a source checkout there are no symlinks to derive the covered set
+# from. Guessing a hardcoded list would reintroduce exactly the Dockerfile drift
+# this check exists to catch, so the check is skipped instead.
+OUT="$("$CHECK" "$ORPHAN" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
+    ok "unknown covered set skips the check rather than guessing"
+else
+    bad "unknown covered set skips the check rather than guessing"
 fi
 
 echo "== fail-closed"

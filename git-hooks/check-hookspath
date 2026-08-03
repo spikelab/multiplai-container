@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# check-hookspath — warn about repos that locally override core.hooksPath.
+# check-hookspath — warn where the container-wide git hook gate does not reach.
 #
 # The container gates every repo through the SYSTEM-level core.hooksPath
-# (/etc/gitconfig → git-hooks/dispatch). Git's config precedence means a
-# repo-local `core.hooksPath` — what husky/lefthook-style installs write —
-# outranks it, silently un-gating that repo's commits and pushes. That
-# precedence fight cannot be won from system config, so this script is the
-# compensating control: scan the workspace, name the un-gated repos, and let
-# a human decide. It is a WARNING, never a blocker — local hooksPath has
-# legitimate uses (this repo's own test harness, for one), and blocking
+# (/etc/gitconfig → git-hooks/dispatch). Two ways a repo slips out from under
+# it, both silent, both detectable only from outside git:
+#
+#   1. A repo-local `core.hooksPath` — what husky/lefthook-style installs
+#      write — outranks system config and un-gates that repo entirely. That
+#      precedence fight cannot be won from /etc/gitconfig.
+#   2. `core.hooksPath` REPLACES .git/hooks rather than adding to it, so a
+#      repo-local hook whose name the dispatcher does not symlink is disabled
+#      outright. The dispatcher chains every name it does symlink; the ones
+#      deliberately left out of the Dockerfile's loop (reference-transaction,
+#      pre-auto-gc, post-index-change) are exactly the gap here.
+#
+# Both are compensating controls: scan the workspace, name what is not covered,
+# and let a human decide. It is a WARNING, never a blocker — local hooksPath
+# has legitimate uses (this repo's own test harness, for one), and blocking
 # container start over it would be a denial-of-service on the workspace.
 #
 # Usage: check-hookspath [ROOT]     (default ROOT: $WORKSPACE)
@@ -18,36 +26,94 @@
 # Scope: working checkouts only (`.git` directories and worktree/submodule
 # `.git` files). Bare repos (`*.git`) are not scanned — nothing commits from
 # inside a bare repo, and the receive-side hooks it runs resolve through the
-# same system hooksPath. Depth-bounded and dependency-dir-pruned so a large
-# bind-mounted workspace stays cheap to scan at container start.
+# same system hooksPath. Depth-bounded and pruned (dependency dirs, and `.git`
+# itself once matched) so a large bind-mounted workspace stays cheap to scan at
+# container start.
 set -uo pipefail
 
 root="${1:-${WORKSPACE:-}}"
 { [ -n "$root" ] && [ -d "$root" ]; } || exit 0
 
-found=0
+# The hook names this gate covers are exactly the dispatcher symlinks sitting
+# next to this script. Deriving the set instead of restating it means the
+# Dockerfile's symlink loop cannot drift out of sync with this check. When the
+# set cannot be determined — running from a source checkout, where the symlinks
+# only exist in the built image — check 2 is skipped rather than guessed at.
+covered=""
+self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd)" || self_dir=""
+if [ -n "$self_dir" ] && [ -e "$self_dir/dispatch" ]; then
+    for link in "$self_dir"/*; do
+        [ -L "$link" ] || continue
+        [ "$(readlink "$link")" = dispatch ] || continue
+        covered="$covered ${link##*/}"
+    done
+fi
+
+hookspath_hits=()
+orphan_hits=()
+seen_hookdirs=" "
+
 while IFS= read -r gitpath; do
     repo="${gitpath%/.git}"
-    # For a worktree/submodule `.git` FILE, --local resolves to the shared
-    # repository config, which is exactly the file that would carry the
-    # override. `git config` exits 1 when the key is unset.
-    hp="$(git -C "$repo" config --local --get core.hooksPath 2>/dev/null)" || continue
-    [ -n "$hp" ] || continue
-    if [ "$found" -eq 0 ]; then
-        printf '%s\n' \
-            "secret-scan: WARNING — repos below set a repo-local core.hooksPath." \
-            "  Local config outranks the container-wide gitleaks gate, so commits" \
-            "  and pushes in these repos are NOT scanned for secrets:" >&2
-        found=1
-    fi
-    printf '  %s  (core.hooksPath = %s)\n' "$repo" "$hp" >&2
-done < <(find "$root" -maxdepth 5 \
-            \( -name node_modules -o -name .venv -o -name venv \) -prune \
-            -o -name .git -print 2>/dev/null)
 
-if [ "$found" -eq 1 ]; then
+    # 1. Local core.hooksPath override. For a worktree/submodule `.git` FILE,
+    #    --local resolves to the shared repository config, which is exactly the
+    #    file that would carry the override. `git config` exits 1 when unset.
+    hp="$(git -C "$repo" config --local --get core.hooksPath 2>/dev/null)"
+    if [ -n "$hp" ]; then
+        hookspath_hits+=("  $repo  (core.hooksPath = $hp)")
+        # An override un-gates the repo wholesale; its own hooks all still run,
+        # so there is nothing to report under check 2 for it.
+        continue
+    fi
+
+    # 2. Repo-local hooks the dispatcher does not chain. Resolve the hooks
+    #    directory via --git-common-dir, NOT `--git-path hooks`: the latter
+    #    honours core.hooksPath and would hand back the dispatcher's own
+    #    directory. --git-common-dir also points every linked worktree at the
+    #    single shared hooks directory, which is the one git actually uses.
+    [ -n "$covered" ] || continue
+    common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
+    [ -n "$common" ] || continue
+    case "$seen_hookdirs" in *" $common "*) continue;; esac
+    seen_hookdirs="$seen_hookdirs$common "
+
+    orphans=""
+    for hook in "$common"/hooks/*; do
+        # Explicit negation rather than `A && B || continue`, which shellcheck
+        # rightly flags (SC2015) as not being if-then-else.
+        if [ ! -f "$hook" ] || [ ! -x "$hook" ]; then continue; fi
+        name="${hook##*/}"
+        case "$name" in *.sample) continue;; esac
+        case " $covered " in *" $name "*) continue;; esac
+        orphans="$orphans $name"
+    done
+    [ -n "$orphans" ] && orphan_hits+=("  $repo  (${orphans# })")
+done < <(find "$root" -maxdepth 7 \
+            \( -name node_modules -o -name .venv -o -name venv \) -prune \
+            -o -name .git -print -prune 2>/dev/null)
+
+if [ "${#hookspath_hits[@]}" -gt 0 ]; then
     printf '%s\n' \
-        "  To restore the gate for a repo:" \
+        "secret-scan: WARNING — repos below set a repo-local core.hooksPath." \
+        "  Local config outranks the container-wide gitleaks gate, so commits" \
+        "  and pushes in these repos are NOT scanned for secrets:" >&2
+    printf '%s\n' "${hookspath_hits[@]}" >&2
+    printf '%s\n' \
+        "  To restore the gate for a repo (its own .git/hooks still run — the" \
+        "  dispatcher chains to them):" \
         "    git -C <repo> config --unset core.hooksPath" >&2
 fi
+
+if [ "${#orphan_hits[@]}" -gt 0 ]; then
+    printf '%s\n' \
+        "secret-scan: WARNING — repo-local hooks below are NOT running." \
+        "  core.hooksPath replaces .git/hooks, and the dispatcher only chains" \
+        "  hook names it symlinks. These names are not among them:" >&2
+    printf '%s\n' "${orphan_hits[@]}" >&2
+    printf '%s\n' \
+        "  Fix by adding the name to the symlink loop in the container's" \
+        "  Dockerfile, then cutting a release." >&2
+fi
+
 exit 0

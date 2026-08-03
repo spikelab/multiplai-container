@@ -46,7 +46,10 @@ sandboxed Claude Code container) and predates this changelog.
   Repo-local hooks are preserved: `core.hooksPath` *replaces* `.git/hooks`
   rather than adding to it, so the dispatcher chains to each repository's own
   hook of the same name (replaying `pre-push` stdin ref lines verbatim, and
-  handing EOF through when there is nothing to replay). Receive-side hook
+  handing EOF through when there is nothing to replay — via a here-string, not
+  a pipe, because under `pipefail` a repo hook that exits without draining
+  stdin makes the writer take SIGPIPE once the ref list passes the 64K pipe
+  buffer, rejecting the push with no finding and no message). Receive-side hook
   names (`pre-receive`, `update`, `post-receive`, `post-update`,
   `proc-receive`, `push-to-checkout`, `fsmonitor-watchman`) are symlinked
   too, so bare-repo hooks still chain. Without that delegation, installing
@@ -69,16 +72,28 @@ sandboxed Claude Code container) and predates this changelog.
   verified with `sha256sum -c` before extraction — a re-tagged release asset
   or CDN compromise fails the build instead of going undetected. Bump the
   SHA args together with `GITLEAKS_VERSION`.
-- `git-hooks/check-hookspath` — warn-only drift check run by the entrypoint:
-  scans `$WORKSPACE` for repos whose *local* `core.hooksPath` overrides (and
-  therefore bypasses) the container-wide gate, and names them at container
-  start.
-- `tests/git-hooks-test.sh` — 25 assertions over throwaway repos: detection and
+- `git-hooks/check-hookspath` — warn-only drift check run by the entrypoint,
+  covering both ways a repo slips out from under the gate. It scans
+  `$WORKSPACE` for repos whose *local* `core.hooksPath` overrides (and
+  therefore bypasses) the container-wide gate, **and** for repo-local hooks
+  whose names the dispatcher does not symlink and so never run at all —
+  `core.hooksPath` replaces `.git/hooks`, so the names deliberately left out of
+  the Dockerfile loop (`reference-transaction`, `pre-auto-gc`,
+  `post-index-change`) are a real hole, and the same warn-don't-block treatment
+  applies. The covered set is read from the dispatcher symlinks at runtime
+  rather than restated here, so the Dockerfile loop cannot drift away from the
+  check; where that set cannot be determined (a source checkout, where the
+  symlinks exist only in the built image) the check is skipped rather than
+  guessed at. Depth reaches nested worktrees and sub-projects — this workspace
+  has three repos deeper than the original bound saw at all.
+- `tests/git-hooks-test.sh` — 30 assertions over throwaway repos: detection and
   redaction on commit and push, the new-branch (`remote_sha` all-zeros) push
   range, the stale-clone force-push regression (unknown remote tip must still
   be scanned; an unwalkable range must fail closed as a scan error),
-  empty-stdin replay as EOF, the `check-hookspath` drift warning, placeholder
-  URLs staying quiet, and both fail-closed paths (missing binary, missing
+  empty-stdin replay as EOF, an 800-ref replay to a repo hook that never reads
+  stdin (the SIGPIPE case above), both `check-hookspath` warnings plus its
+  depth reach and its skip-rather-than-guess path, placeholder URLs staying
+  quiet, and both fail-closed paths (missing binary, missing
   ruleset — neither may silently fall back to upstream defaults). Wired into
   CI, which reads `GITLEAKS_VERSION` and `GITLEAKS_SHA256_X64` straight out
   of the Dockerfile so the tested and shipped binaries cannot drift.

@@ -223,7 +223,13 @@ case "$hook_name" in
         scan_push_range "$push_stdin"
         if [ -x "$own_hook" ]; then
             if [ -n "$push_stdin" ]; then
-                printf '%s\n' "$push_stdin" | "$own_hook" "$@"
+                # A here-string, NOT `printf … | "$own_hook"`. Under pipefail a
+                # pipeline reports the highest failure, and a repo-local hook
+                # that exits without draining stdin makes printf take SIGPIPE
+                # once the ref lines exceed the 64K pipe buffer (~500 refs, so
+                # `git push --all` on a branch-heavy repo). That surfaced as
+                # exit 141 — a push rejected with no finding and no message.
+                "$own_hook" "$@" <<<"$push_stdin"
             else
                 # Nothing to replay: hand the hook EOF, as git would have.
                 # `printf '%s\n' ""` would deliver one blank line instead,
