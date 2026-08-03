@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.8] – 2026-08-03
+
 ### Added
 
 - **Container-wide secret-leak gate.** `git-hooks/dispatch` is installed as
@@ -97,6 +99,8 @@ sandboxed Claude Code container) and predates this changelog.
   ruleset — neither may silently fall back to upstream defaults). Wired into
   CI, which reads `GITLEAKS_VERSION` and `GITLEAKS_SHA256_X64` straight out
   of the Dockerfile so the tested and shipped binaries cannot drift.
+
+[0.8]: https://github.com/spikelab/multiplai-container/compare/v0.7...v0.8
 
 ## [0.7] – 2026-07-30
 
