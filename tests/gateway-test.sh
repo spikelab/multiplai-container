@@ -92,9 +92,15 @@ expect_allow "escaped paren scheme is one argv word" \
   'xcodebuild -scheme MyApp\ \(Dev\) build' 'ARG:[MyApp (Dev)]'
 
 echo "# smuggling attempts stay denied"
+# The single quotes are the point: these payloads must reach the gateway as
+# literal text so it can refuse them. If the shell expanded `$(…)` or a backtick
+# here, the test would be checking that the gateway rejects the *result* of the
+# injection — after this harness had already run it.
 expect_deny "semicolon chain"           'swift build; rm -rf /tmp/x'          "metacharacter"
 expect_deny "&& chain after cd"         "cd $TMP/plain && rm -rf /tmp/x && swift build" "metacharacter"
+# shellcheck disable=SC2016  # literal payload, see above
 expect_deny "command substitution"      'swift build $(touch /tmp/pwned)'     "metacharacter"
+# shellcheck disable=SC2016  # literal payload, see above
 expect_deny "backtick substitution"     'swift build `touch /tmp/pwned`'      "metacharacter"
 expect_deny "pipe to shell"             'swift build | sh'                    "metacharacter"
 expect_deny "redirect"                  'swift build > /tmp/x'                "metacharacter"

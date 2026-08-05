@@ -75,6 +75,8 @@ BRANCH="$(git branch --show-current)"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean — commit or stash first"
 git fetch --quiet origin main
 LOCAL="$(git rev-parse @)"
+# `@{u}` is git rev syntax for "the upstream of HEAD", not brace expansion.
+# shellcheck disable=SC1083
 REMOTE="$(git rev-parse @{u} 2>/dev/null)" || die "main has no upstream — set one with 'git branch --set-upstream-to=origin/main main'"
 [ "$LOCAL" = "$REMOTE" ] || die "local main not in sync with origin/main — pull/push first"
 say "on main, clean, in sync with origin ($(git rev-parse --short @))"
@@ -179,7 +181,9 @@ if $DO_KIT; then
       KIT_DIR="$MULTIPLAI_KIT"
     fi
   fi
-  [ -n "$KIT_DIR" ] && [ -f "$KIT_DIR/setup.sh" ] || die "kit not found — pass --kit <path>, set \$MULTIPLAI_KIT, or use --no-kit"
+  if [ -z "$KIT_DIR" ] || [ ! -f "$KIT_DIR/setup.sh" ]; then
+    die "kit not found — pass --kit <path>, set \$MULTIPLAI_KIT, or use --no-kit"
+  fi
   grep -qE 'CONTAINER_REF:-v[0-9]' "$KIT_DIR/setup.sh" || die "no CONTAINER_REF default found in $KIT_DIR/setup.sh"
   [ -z "$(git -C "$KIT_DIR" status --porcelain setup.sh)" ] || die "kit setup.sh has uncommitted changes — resolve first"
   # Structural guard: the pin commit must land on the kit SOURCE's main and be

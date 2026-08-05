@@ -1,4 +1,9 @@
 #!/bin/bash
+# The benchmark payloads are single-quoted on purpose: `$(date +%s%N)` and
+# friends must be evaluated by the shell *inside* the container being measured,
+# not by this one. Expanding them here would time the host.
+# shellcheck disable=SC2016
+#
 # apple-containers-experiment.sh — Compare Apple Containers vs OrbStack (Docker)
 #
 # Runs a series of tests building and running the Claude Code Multiplai container
@@ -31,8 +36,6 @@ TIMESTAMP=$(date +%Y-%m-%dT%H:%M:%S)
 # Image names
 DOCKER_IMAGE="claude-multiplai:local"
 APPLE_IMAGE="claude-multiplai-apple"
-# Simplified Dockerfile for the experiment (arm64-native, minimal)
-APPLE_DOCKERFILE="$REPORT_DIR/Dockerfile.apple-arm64"
 
 # Colors
 RED='\033[0;31m'
@@ -641,26 +644,31 @@ do_report() {
 
 HEADER
 
-    echo "**Date:** $TIMESTAMP" >> "$REPORT_FILE"
-    echo "**Machine:** $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'unknown')" >> "$REPORT_FILE"
-    echo "**macOS:** $(sw_vers -productVersion)" >> "$REPORT_FILE"
-    echo "**Memory:** $(sysctl -n hw.memsize | awk '{printf "%.0f", $1/1073741824}')GB" >> "$REPORT_FILE"
-    echo "" >> "$REPORT_FILE"
+    {
+        echo "**Date:** $TIMESTAMP"
+        echo "**Machine:** $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'unknown')"
+        echo "**macOS:** $(sw_vers -productVersion)"
+        echo "**Memory:** $(sysctl -n hw.memsize | awk '{printf "%.0f", $1/1073741824}')GB"
+        echo ""
 
-    echo "## Raw Results" >> "$REPORT_FILE"
-    echo "" >> "$REPORT_FILE"
-    echo '```' >> "$REPORT_FILE"
-    echo "runtime,metric,value,unit" >> "$REPORT_FILE"
-    cat "$REPORT_DIR/results.csv" >> "$REPORT_FILE"
-    echo '```' >> "$REPORT_FILE"
-    echo "" >> "$REPORT_FILE"
+        echo "## Raw Results"
+        echo ""
+        echo '```'
+        echo "runtime,metric,value,unit"
+        cat "$REPORT_DIR/results.csv"
+        echo '```'
+        echo ""
 
-    echo "## Summary Table" >> "$REPORT_FILE"
-    echo "" >> "$REPORT_FILE"
-    echo "| Test | Docker (OrbStack) | Apple Containers | Notes |" >> "$REPORT_FILE"
-    echo "|------|-------------------|------------------|-------|" >> "$REPORT_FILE"
+        echo "## Summary Table"
+        echo ""
+        echo "| Test | Docker (OrbStack) | Apple Containers | Notes |"
+        echo "|------|-------------------|------------------|-------|"
+    } >> "$REPORT_FILE"
 
-    # Parse results.csv and build summary table
+    # Parse results.csv and build summary table. Every read in this loop —
+    # the redirect and the grep below — is a read; the writes all go to
+    # $REPORT_FILE, which is a different file.
+    # shellcheck disable=SC2094
     while IFS=, read -r runtime metric value unit; do
         # Skip system metrics (already in header)
         [[ "$runtime" == "system" ]] && continue
@@ -673,11 +681,13 @@ HEADER
         echo "| $metric | $value $unit | ${apple_value:-N/A} $unit | |" >> "$REPORT_FILE"
     done < "$REPORT_DIR/results.csv"
 
-    echo "" >> "$REPORT_FILE"
-    echo "## Build Logs" >> "$REPORT_FILE"
-    echo "" >> "$REPORT_FILE"
-    echo "- Docker: \`$REPORT_DIR/docker-build.log\`" >> "$REPORT_FILE"
-    echo "- Apple: \`$REPORT_DIR/apple-build.log\`" >> "$REPORT_FILE"
+    {
+        echo ""
+        echo "## Build Logs"
+        echo ""
+        echo "- Docker: \`$REPORT_DIR/docker-build.log\`"
+        echo "- Apple: \`$REPORT_DIR/apple-build.log\`"
+    } >> "$REPORT_FILE"
 
     ok "Report written to $REPORT_FILE"
     echo ""
