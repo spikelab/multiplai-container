@@ -97,6 +97,22 @@ when the recorded hash no longer matches, `up`/`build` print a **stderr warning*
 ("profile … is stale — re-freeze on the Mac") and proceed against the frozen
 file. Drift never fails and never causes a fallback to the workspace copy.
 
+## `up` waits for healthchecks
+
+`up` runs `up -d --wait --wait-timeout 600`, so **the command returning means the
+stack is usable**, not merely that containers were created. This is not a
+nicety: a container reaches `running` in seconds while an entrypoint that runs
+database migrations needs minutes, and a session that `exec`s into that gap gets
+errors from a half-migrated schema that look exactly like data bugs. (2026-08-06:
+a seed 38 seconds after `up` died on `Column 'last_login' cannot be null` —
+`auth.0001_initial` had landed, `auth.0005_alter_user_last_login_null` had not.)
+
+`up` prints a heads-up before waiting, since a first boot legitimately looks like
+a hang; watch it from another session with `logs`. On timeout it exits non-zero
+and points at `ps`/`logs` — the stack is often still starting, so that is a
+prompt to look, not a verdict. The 600s bound exists because Compose's own
+default is to wait forever.
+
 ## Instances, worktrees and cleanup
 
 The compose project is always `<PROJECT_PREFIX>-<instance>`, so named volumes are

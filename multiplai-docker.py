@@ -96,6 +96,15 @@ CONF_KEYS_OPTIONAL = ("SOURCE_FILES", "SOURCE_SHA256", "BIND_ROOT", "WORKTREE_RO
 DEFAULT_TAIL = 200
 MAX_TAIL = 2000
 
+# `up` waits for healthchecks: "the command returned" must mean "the stack is
+# usable". Containers reach `running` in seconds while an entrypoint that runs
+# database migrations needs minutes, and an agent that execs into that gap gets
+# errors from a half-migrated schema and misreads them as data bugs (seen
+# 2026-08-06: loaddata hit `last_login cannot be null` because
+# auth.0005_alter_user_last_login_null had not been applied yet).
+# Bounded, because Compose's own default is to wait forever.
+WAIT_TIMEOUT = 600
+
 
 class Fail(Exception):
     """A usage/config error: message to stderr, exit 1."""
@@ -643,9 +652,28 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
         if verb == "up":
             if args:
                 raise Fail("up takes no extra arguments: %s" % " ".join(args))
-            rc = run_or_die(base + ["up", "-d"])
+            print(
+                "starting %s and waiting for healthchecks (up to %ds).\n"
+                "  first boot runs migrations and can take minutes — this is not a hang.\n"
+                "  watch from another session: multiplai-docker logs %s <service>"
+                % (project, WAIT_TIMEOUT, conf["_name"])
+            )
+            rc = run_or_die(
+                base + ["up", "-d", "--wait", "--wait-timeout", str(WAIT_TIMEOUT)]
+            )
             if rc == 0:
                 print_urls(conf, project)
+            else:
+                print(
+                    "up did not reach a healthy state within %ds (or a container "
+                    "exited).\n"
+                    "  the stack may still be starting — check before assuming it "
+                    "failed:\n"
+                    "    multiplai-docker ps   %s\n"
+                    "    multiplai-docker logs %s <service>"
+                    % (WAIT_TIMEOUT, conf["_name"], conf["_name"]),
+                    file=sys.stderr,
+                )
             return rc
 
         if verb == "down":

@@ -135,7 +135,7 @@ md() {  # run the tool; sets OUT, ERR, RC
 last_argv() { tail -n 1 "$ARGV"; }
 # `up` is followed by the `docker ps` that print_urls runs, so the compose argv
 # under test is the last `up -d` line, not the last line.
-up_argv()   { grep -e ' up -d$' "$ARGV" | tail -n 1; }
+up_argv()   { grep -e ' up -d --wait ' "$ARGV" | tail -n 1; }
 
 # Predicates, so every assertion is a COMMAND (keeps `$?`-after-a-condition,
 # and the subtle overwrite bug behind it, out of the harness entirely).
@@ -198,11 +198,21 @@ echo "# up/down/ps — the frozen file, verbatim, when no worktree matches"
 printf 'dolce-main-engine-1\tengine\ndolce-main-celery-beat-1\tcelery-beat\n' > "$PS_ROWS"
 expect_ok "up succeeds" up dolce
 expect_up_argv "up argv is exactly the frozen file + project" \
-  "compose -f $FROZEN --project-directory $PROJ -p dolce-main up -d"
+  "compose -f $FROZEN --project-directory $PROJ -p dolce-main up -d --wait --wait-timeout 600"
 assert "up prints the hostname URL for a service that had published ports" \
   like "$OUT" '*http://dolce-main-engine-1.orb.local:8000*'
 assert "up prints no URL for a service that had none" \
   unlike "$OUT" '*celery-beat-1.orb.local*'
+assert "up warns that first boot is slow, not hung" like "$OUT" '*not a hang*'
+
+# `up` returning must mean the stack is USABLE: a container reaches `running` in
+# seconds while a migrating entrypoint needs minutes, and an exec into that gap
+# reads a half-migrated schema as a data bug.
+DOCKER_STUB_RC=1 md up dolce
+assert "a failed wait is a non-zero exit" [ "$RC" -ne 0 ]
+assert "a failed wait points at ps/logs rather than just failing" \
+  like "$ERR" '*multiplai-docker logs dolce <service>*'
+assert "a failed wait prints no URLs" unlike "$OUT" '*orb.local*'
 : > "$PS_ROWS"
 expect_ok "down succeeds" down dolce --instance b
 expect_argv "down passes -v and the per-instance project" \
@@ -216,7 +226,7 @@ WT_COMPOSE="$(up_argv)"; WT_COMPOSE="${WT_COMPOSE#compose -f }"; WT_COMPOSE="${W
 assert "worktree instance runs against a TEMP compose file, not the frozen one" \
   like "$WT_COMPOSE" "$TMP/tmp/multiplai-docker-dolce-wt1-*.json"
 assert "worktree instance keeps the per-instance project name" \
-  like "$(up_argv)" '*-p dolce-wt1 up -d'
+  like "$(up_argv)" '*-p dolce-wt1 up -d --wait*'
 assert "binds under BIND_ROOT are re-prefixed; the named volume is untouched" \
   "$PY" "$TMP/check_rewrite.py" "$CAPTURED" "$WT/wt1/app"
 assert "the temp compose file is cleaned up" test ! -e "$WT_COMPOSE"
@@ -224,7 +234,7 @@ expect_fail "a bind with no counterpart in the worktree fails cleanly" \
   "has no counterpart" up dolce --instance wt2
 expect_ok "a non-worktree instance still uses the frozen file" up dolce --instance b
 expect_up_argv "non-worktree instance argv" \
-  "compose -f $FROZEN --project-directory $PROJ -p dolce-b up -d"
+  "compose -f $FROZEN --project-directory $PROJ -p dolce-b up -d --wait --wait-timeout 600"
 
 echo "# logs / restart / build"
 expect_ok "logs default tail" logs dolce engine
@@ -295,7 +305,7 @@ sed -i.bak 's/^SOURCE_SHA256=.*/SOURCE_SHA256=deadbeef/' "$CONF" && rm -f "$CONF
 expect_ok "up proceeds against a stale profile" up dolce
 assert "up warns on drift" like "$ERR" '*is stale*'
 expect_up_argv "a stale profile still runs the frozen file" \
-  "compose -f $FROZEN --project-directory $PROJ -p dolce-main up -d"
+  "compose -f $FROZEN --project-directory $PROJ -p dolce-main up -d --wait --wait-timeout 600"
 sed -i.bak "s|^SOURCE_SHA256=.*|$GOOD_SHA|" "$CONF" && rm -f "$CONF.bak"
 md up dolce
 assert "no warning once the hashes match again" unlike "$ERR" '*is stale*'
