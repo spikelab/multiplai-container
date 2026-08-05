@@ -16,6 +16,18 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Changed
+
+- **`up` now waits for healthchecks** (`up -d --wait --wait-timeout 600`), so
+  "the command returned" means "the stack is usable". Containers reach `running`
+  in seconds while an entrypoint that runs database migrations needs minutes; an
+  agent that `exec`s into that gap reads a half-migrated schema and misdiagnoses
+  it as a data bug. Observed 2026-08-06: a seed 38s after `up` failed with
+  `Column 'last_login' cannot be null`, because `auth.0001_initial` had been
+  applied and `auth.0005_alter_user_last_login_null` had not. `up` prints a
+  heads-up before waiting, and on timeout points at `ps`/`logs` rather than just
+  failing. Bounded at 600s — Compose's own default is to wait forever.
+
 ## [0.9.1] – 2026-08-06
 
 ### Fixed

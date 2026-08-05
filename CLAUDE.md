@@ -81,6 +81,10 @@ tail, guarded guest argv. Invariants to preserve:
   network while every argv assertion still passes; that is exactly how it
   shipped in v0.9. Keep `external: true` names, which the stack does not own.
   The stub fixture carries resolved names precisely so this cannot regress.
+- **`up` waits (`--wait`), and that is load-bearing.** A returning `up` must mean
+  a usable stack: containers are `running` in seconds, migrations take minutes,
+  and a session that `exec`s into that gap misreads a half-migrated schema as a
+  data bug. Keep the wait bounded — Compose's default is forever.
 - Widening the verb list means widening the gateway branch too — the two are one
   contract, and `tests/multiplai-docker-test.sh` plus `tests/gateway-test.sh`
   cover the two halves. Both mutate-check cleanly; keep it that way.
