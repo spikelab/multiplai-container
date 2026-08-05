@@ -16,6 +16,73 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **`multiplai-docker` — controlled Docker Compose access from a session
+  container.** A session can now start, inspect and tear down **parallel named
+  instances** of an allowlisted set of Compose stacks on the Mac, mid-session,
+  over the existing SSH bridge, without ever authoring a Docker argument or a
+  compose file:
+
+  ```
+  ssh host.docker.internal multiplai-docker up   dolce --instance wt1
+  ssh host.docker.internal multiplai-docker ls   dolce
+  ssh host.docker.internal multiplai-docker logs dolce engine 200 --instance wt1
+  ssh host.docker.internal multiplai-docker exec dolce engine --instance wt1 -- python manage.py showmigrations
+  ssh host.docker.internal multiplai-docker down dolce --instance wt1
+  ```
+
+  The design closes the hole by construction rather than by validation: a
+  **profile** is a compose configuration you resolved and froze once on the Mac
+  (`multiplai-docker freeze`), stored outside every container mount. The agent
+  supplies only labels — a profile name, a verb from a fixed list, an instance
+  name, a service name, a numeric tail, and charset-guarded guest argv for
+  `exec`. Agent input never reaches Compose, so there is no runtime validator to
+  bypass and no TOCTOU window. Instances are ephemeral by construction: the
+  compose project is `<prefix>-<instance>`, so named volumes are per-instance
+  and `down` always runs `down -v`; `reap-older-than <hours>` catches leaks.
+  Published ports are stripped at freeze time, so parallel instances never
+  collide — reach services by their OrbStack hostnames.
+
+  Three agents in three worktrees can run `up <profile> --instance wt1|wt2|wt3`
+  and get three isolated stacks, each bind-mounting its own worktree's code: the
+  one runtime transform re-prefixes binds under `BIND_ROOT` into
+  `WORKTREE_ROOT/<instance>` when a worktree of that name exists.
+
+- **Gateway allowlist entry for `multiplai-docker`** — one new branch in
+  `container-build-gateway.sh`, holding the verb to a fixed list, the profile
+  and instance names to their regexes, and rejecting every caller-supplied flag
+  other than `--instance <token>`. `freeze` is deliberately **not** in that list:
+  creating or changing a profile is a host-terminal act, so bridge callers are
+  denied before the script runs. The no-shell-reparse invariant is untouched —
+  argv still travels as data, and argv[0] is pinned to a host-side constant.
+
+- **`tests/multiplai-docker-test.sh`** — a stub-docker harness (no daemon, no
+  network) asserting the argv the tool hands Compose: the frozen file verbatim
+  when no worktree matches, a temp file with re-prefixed binds and untouched
+  named volumes when one does, `down -v`, the per-instance project name, the
+  `exec` guest-argv charset, the log-tail cap, the drift warning, and the
+  refusal of group/world-writable or symlinked profile files. Wired into CI
+  alongside the gateway harness, which gained matching allowlist cases.
+
+### Setup
+
+After `git pull && ./setup.sh`, **each profile must be frozen once on the Mac**
+before a session can use it — this is the trust step, and it is the only place
+compose input is established:
+
+```bash
+multiplai-docker freeze dolce \
+  -f ~/Documents/knowhere/PROJECTS/DolceBot/DolceEngine/docker-compose.yml \
+  -f ~/Documents/knowhere/PROJECTS/DolceBot/DolceEngine/docker-compose.dev.yml
+# then review ~/.local/share/multiplai/docker-profiles/dolce.json once
+```
+
+`freeze` derives `PROJECT_DIR`/`BIND_ROOT` from the first `-f` file's directory
+and `WORKTREE_ROOT` from the nearest ancestor holding a `.worktrees/` directory;
+`--project-dir`, `--bind-root`, `--worktree-root` and `--prefix` override each.
+No `authorized_keys` change is needed — the existing forced command covers it.
+
 ### Changed
 
 - CI now runs `shellcheck` over **every** shipped shell script except
