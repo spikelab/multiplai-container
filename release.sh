@@ -181,7 +181,9 @@ if $DO_KIT; then
       KIT_DIR="$MULTIPLAI_KIT"
     fi
   fi
-  [ -n "$KIT_DIR" ] && [ -f "$KIT_DIR/setup.sh" ] || die "kit not found — pass --kit <path>, set \$MULTIPLAI_KIT, or use --no-kit"
+  if [ -z "$KIT_DIR" ] || [ ! -f "$KIT_DIR/setup.sh" ]; then
+    die "kit not found — pass --kit <path>, set \$MULTIPLAI_KIT, or use --no-kit"
+  fi
   grep -qE 'CONTAINER_REF:-v[0-9]' "$KIT_DIR/setup.sh" || die "no CONTAINER_REF default found in $KIT_DIR/setup.sh"
   [ -z "$(git -C "$KIT_DIR" status --porcelain setup.sh)" ] || die "kit setup.sh has uncommitted changes — resolve first"
   # Structural guard: the pin commit must land on the kit SOURCE's main and be
