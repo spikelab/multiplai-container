@@ -14,10 +14,11 @@
 #     HOST_UID/HOST_GID/WORKSPACE build args that only make sense on a
 #     developer's machine. `release.sh` refuses to cut a tag unless the build
 #     passes there, which is where the check has teeth: nothing ships from CI.
-#   * shellcheck over release.sh (SC1083 false positive on git's `@{u}` rev
-#     syntax), container-build-gateway.sh (zsh — SC1071, unsupported by
-#     shellcheck), and apple-containers-experiment.sh / tests/gateway-test.sh
-#     (informational findings only). Tracked as an issue rather than fixed here.
+#   * shellcheck over container-build-gateway.sh. It is zsh, which shellcheck
+#     does not support (SC1071), and it is zsh on purpose — the no-shell-reparse
+#     invariant leans on `(z)`/`(Q)` tokenizing. It will never join this set;
+#     `zsh -n` covers its syntax above and tests/gateway-test.sh covers its
+#     behaviour. Every other shipped script is checked.
 
 name: CI
 
@@ -66,7 +67,7 @@ jobs:
           done
 
   shellcheck:
-    name: shellcheck (clean scripts)
+    name: shellcheck (every script but the zsh gateway)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -74,9 +75,10 @@ jobs:
         run: shellcheck --version
       - name: shellcheck
         run: |
-          shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf \
+          shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf release.sh \
+                     apple-containers-experiment.sh \
                      git-hooks/dispatch git-hooks/check-hookspath \
-                     tests/git-hooks-test.sh
+                     tests/git-hooks-test.sh tests/gateway-test.sh
 
   git-hooks-tests:
     name: git hook secret-gate harness

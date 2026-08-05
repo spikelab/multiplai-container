@@ -75,6 +75,8 @@ BRANCH="$(git branch --show-current)"
 [ -z "$(git status --porcelain)" ] || die "working tree not clean — commit or stash first"
 git fetch --quiet origin main
 LOCAL="$(git rev-parse @)"
+# `@{u}` is git rev syntax for "the upstream of HEAD", not brace expansion.
+# shellcheck disable=SC1083
 REMOTE="$(git rev-parse @{u} 2>/dev/null)" || die "main has no upstream — set one with 'git branch --set-upstream-to=origin/main main'"
 [ "$LOCAL" = "$REMOTE" ] || die "local main not in sync with origin/main — pull/push first"
 say "on main, clean, in sync with origin ($(git rev-parse --short @))"
