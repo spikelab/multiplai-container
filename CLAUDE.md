@@ -75,7 +75,12 @@ tail, guarded guest argv. Invariants to preserve:
   must never make the tool read the unfrozen copy.
 - **`down` always passes `-v`**, and the project is always
   `<PROJECT_PREFIX>-<instance>`. Instances are ephemeral; per-instance named
-  volumes depend on that project name.
+  volumes depend on that project name — **and on `freeze` stripping the
+  resolved `name:` that `compose config` bakes into top-level volumes and
+  networks.** Leave those in and every instance shares one database and one
+  network while every argv assertion still passes; that is exactly how it
+  shipped in v0.9. Keep `external: true` names, which the stack does not own.
+  The stub fixture carries resolved names precisely so this cannot regress.
 - Widening the verb list means widening the gateway branch too — the two are one
   contract, and `tests/multiplai-docker-test.sh` plus `tests/gateway-test.sh`
   cover the two halves. Both mutate-check cleanly; keep it that way.

@@ -16,6 +16,29 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`multiplai-docker freeze`: instances shared one volume set and one
+  network.** `docker compose config` *resolves* top-level volume and network
+  names against the source project and emits them as explicit `name:` keys
+  (`dolceengine_mysql_data`), so the frozen file pinned them for every instance
+  — `--instance a` and `--instance b` would have run against the same MySQL
+  volume and the same network, defeating the isolation the tool exists for.
+  `freeze` now drops the resolved `name` from every non-`external` volume and
+  network so Compose re-derives `<project>_<key>` per instance. `external: true`
+  entries name something the stack does not own, so their name is kept.
+  **Existing profiles must be re-frozen** — the fix is in `freeze`, not at run
+  time. Caught by a real `up`, not the harness; the stub fixture now carries
+  resolved names and both halves mutate-check.
+
+### Added
+
+- **`up` prints the reachable URLs.** Host ports are stripped so instances can
+  coexist, which left no hint of how to reach the stack. `freeze` now records
+  the container-side targets of the ports it strips as `x-multiplai-ports`, and
+  `up` prints `http://<container>.orb.local:<port>` per service. Ports come from
+  the frozen file — the tool never probes a container.
+
 ## [0.9] – 2026-08-06
 
 ### Added
