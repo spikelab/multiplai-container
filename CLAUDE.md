@@ -58,6 +58,30 @@ allowlists by command. When widening the allowlist, preserve that invariant
 (strip only known-safe literal wrappers, exec user argv as data). Ship changes
 through `release.sh` like everything else.
 
+## Editing `multiplai-docker.py`
+
+It lets a container run Compose stacks on the host, so its safety rests on one
+property: **agent input never reaches Compose.** The compose configuration is
+frozen host-side by `freeze` (the trust step, deliberately absent from the
+gateway allowlist); at run time the container supplies only labels — a profile
+name, a verb from the fixed list, an instance name, a service name, a numeric
+tail, guarded guest argv. Invariants to preserve:
+
+- **Exactly one runtime transform of the frozen file** — the worktree bind
+  rewrite. Anything else (injecting labels, merging overrides, "just one flag")
+  reopens the hole and breaks the `up` argv assertion in the harness.
+- **Never fall back to the workspace compose files.** They are read only to hash
+  them for the drift warning, which warns and proceeds — it must never fail, and
+  must never make the tool read the unfrozen copy.
+- **`down` always passes `-v`**, and the project is always
+  `<PROJECT_PREFIX>-<instance>`. Instances are ephemeral; per-instance named
+  volumes depend on that project name.
+- Widening the verb list means widening the gateway branch too — the two are one
+  contract, and `tests/multiplai-docker-test.sh` plus `tests/gateway-test.sh`
+  cover the two halves. Both mutate-check cleanly; keep it that way.
+
+Full design and host setup: [docs/multiplai-docker.md](docs/multiplai-docker.md).
+
 ## Editing the secret gate (`git-hooks/`)
 
 The image installs `git-hooks/dispatch` as *every* git hook via

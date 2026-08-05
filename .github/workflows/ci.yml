@@ -5,7 +5,9 @@
 # automated test of the container→host security boundary), and the git-hook
 # secret-gate harness (the other one: it proves a secret cannot leave via a
 # commit or a push, and that the custom sk-ant-* ruleset is actually loaded —
-# upstream gitleaks defaults do not detect Anthropic credentials at all).
+# upstream gitleaks defaults do not detect Anthropic credentials at all), and
+# the multiplai-docker stub-docker harness (which asserts the argv the host
+# script hands Compose — no daemon involved, by design).
 #
 # What does NOT run, and why:
 #   * `docker build` (the gate release.sh enforces locally). The image pulls the
@@ -43,11 +45,14 @@ jobs:
         run: |
           for f in build.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
                    apple-containers-experiment.sh tests/gateway-test.sh \
+                   tests/multiplai-docker-test.sh \
                    git-hooks/dispatch git-hooks/check-hookspath \
                    tests/git-hooks-test.sh; do
             echo "== $f"
             bash -n "$f"
           done
+      - name: python -m py_compile (the python-only scripts)
+        run: python3 -m py_compile multiplai-docker.py
       - name: zsh -n (the zsh-only scripts)
         run: |
           for f in container-build-gateway.sh multiplai-gh-token; do
@@ -61,7 +66,8 @@ jobs:
         run: |
           for f in build.sh release.sh venv-sync-entrypoint.sh \
                    container-build-gateway.sh apple-containers-experiment.sh \
-                   multiplai-gh-token tests/gateway-test.sh \
+                   multiplai-gh-token multiplai-docker.py \
+                   tests/gateway-test.sh tests/multiplai-docker-test.sh \
                    tests/git-hooks-test.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
@@ -78,7 +84,8 @@ jobs:
           shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf release.sh \
                      apple-containers-experiment.sh \
                      git-hooks/dispatch git-hooks/check-hookspath \
-                     tests/git-hooks-test.sh tests/gateway-test.sh
+                     tests/git-hooks-test.sh tests/gateway-test.sh \
+                     tests/multiplai-docker-test.sh
 
   git-hooks-tests:
     name: git hook secret-gate harness
@@ -113,3 +120,14 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       - name: tests/gateway-test.sh
         run: ./tests/gateway-test.sh
+
+  multiplai-docker-tests:
+    name: multiplai-docker stub-docker harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No daemon needed, and deliberately so: the harness puts a stub `docker`
+      # first on PATH and asserts on the argv the tool builds. A real stack
+      # launch is the host owner's acceptance step, not CI's.
+      - name: tests/multiplai-docker-test.sh
+        run: ./tests/multiplai-docker-test.sh

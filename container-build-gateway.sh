@@ -197,6 +197,62 @@ case "$c1" in
     words[1]="$HOME/.local/bin/multiplai-gh-token"
     allow=1
     ;;
+  multiplai-docker)
+    # Starts/inspects/tears down PRE-FROZEN Docker Compose stacks on the host.
+    # The container never authors a Docker argument or a compose file: the host
+    # script runs Compose against a config the host owner froze in advance, and
+    # everything below is a label — a verb, a profile name, an instance name, a
+    # service name, a numeric tail, or guarded guest argv for `exec`.
+    #
+    # `freeze` is the trust step and is deliberately NOT in this list: creating
+    # or changing a profile is a host-terminal act, so bridge callers are denied
+    # before the script even runs.
+    case "$c2" in
+      up|down|ps|ls|logs|restart|build|exec|reap-older-than) ;;
+      *) deny "multiplai-docker verb not allowed: ${c2:-<none>}" ;;
+    esac
+    # words[3] is the profile for every verb that takes one (`ls` may omit it,
+    # `reap-older-than` takes hours instead) — hold it to the profile regex the
+    # host script enforces, so a bad name dies here too.
+    if [[ "$c2" != "reap-older-than" && -n "${words[3]:-}" && "${words[3]}" != "--"* ]]; then
+      p="${words[3]}"
+      [[ "${p//[a-z0-9_-]/}" == "" && "$p" == [a-z0-9]* && ${#p} -le 32 ]] \
+        || deny "multiplai-docker: invalid profile name: $p"
+    fi
+    i=3; past_ddash=0; want_instance=0
+    while (( i <= ${#words} )); do
+      w="${words[i]}"
+      if (( past_ddash )); then
+        # exec's guest argv: reaches the guest entrypoint via `compose exec -T`,
+        # never Docker itself. Same charset the host script re-checks.
+        [[ "$c2" == "exec" ]] || deny "multiplai-docker: '--' is only for exec"
+        [[ "$w" == -* ]] && deny "multiplai-docker: guest argument may not start with '-': $w"
+        [[ -n "$w" && "${w//[A-Za-z0-9._:=\/@,-]/}" == "" ]] \
+          || deny "multiplai-docker: guest argument not allowed: $w"
+      elif (( want_instance )); then
+        [[ "${w//[a-z0-9-]/}" == "" && "$w" == [a-z0-9]* && ${#w} -le 16 ]] \
+          || deny "multiplai-docker: invalid instance name: $w"
+        want_instance=0
+      elif [[ "$w" == "--" ]]; then
+        past_ddash=1
+      elif [[ "$w" == "--instance" ]]; then
+        want_instance=1
+      elif [[ "$w" == -* ]]; then
+        deny "multiplai-docker flag not allowed: $w"
+      else
+        # profile / service / numeric tail — labels, never paths or flags.
+        [[ "${w//[a-z0-9._-]/}" == "" && "$w" == [a-z0-9]* && ${#w} -le 64 ]] \
+          || deny "multiplai-docker: invalid token: $w"
+      fi
+      (( i++ ))
+    done
+    (( want_instance )) && deny "multiplai-docker: --instance needs a value"
+    # Same argv[0] pin as multiplai-gh-token: ~/.local/bin is not on the login
+    # PATH, and this substitutes a HOST-SIDE CONSTANT — no client string is
+    # re-parsed by a shell, so argv still travels as data.
+    words[1]="$HOME/.local/bin/multiplai-docker.py"
+    allow=1
+    ;;
   curl)
     # Loopback-only URLs (checked below) plus a flag allowlist: reject any flag
     # that could write/read host files or reach a non-URL transport

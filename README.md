@@ -68,7 +68,13 @@ The bridge lets container skills run Mac-only tools (Xcode builds,
 mlx-whisper, driving Chrome via `ab`) over a key-restricted SSH gateway. It
 also provides `multiplai-gh-token`, which mints a 1-hour **GitHub App
 installation token** on the host so the App's private key never enters a
-container — see [docs/gh-app-token.md](docs/gh-app-token.md).
+container — see [docs/gh-app-token.md](docs/gh-app-token.md) — and
+`multiplai-docker`, which runs **pre-frozen Docker Compose stacks** on the host
+as parallel named instances (`multiplai-docker up dolce --instance wt1`). The
+container never authors a Docker argument or a compose file: you freeze each
+stack once on the Mac with `multiplai-docker freeze`, and sessions may only name
+a profile, a verb, an instance and a service — see
+[docs/multiplai-docker.md](docs/multiplai-docker.md).
 
 > **Security — enable only for containers you trust.** The gateway is an
 > allowlist, but the tools it allows are powerful *by design*: `swift
@@ -121,10 +127,13 @@ Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 | `build.sh` | Builds the image from `.env` config (kit root `.env`, or one next to this script) |
 | `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac |
 | `md2pdf` | Markdown→PDF wrapper baked into the image (`pandoc --pdf-engine=typst`) |
+| `multiplai-docker.py` | Host-side runner for pre-frozen Docker Compose stacks — parallel named instances over the bridge, agent input never reaches Compose (setup: [docs/multiplai-docker.md](docs/multiplai-docker.md)) |
+| `docs/multiplai-docker.md` | Host setup for `multiplai-docker`: freezing a profile, the verb list, worktree instances, threat model |
 | `multiplai-gh-token` | Host-side minter for GitHub App installation tokens — the App key stays on the Mac, the container gets a 1-hour token over the bridge (setup: [docs/gh-app-token.md](docs/gh-app-token.md)) |
 | `docs/gh-app-token.md` | Host setup for `multiplai-gh-token`: per-app credential layout, threat model, transcript hygiene, migration |
 | `release.sh` | Maintainer release tool — build- and changelog-gated tag + kit pin bump (see [CLAUDE.md](CLAUDE.md)) |
 | `tests/gateway-test.sh` | ALLOW/DENY harness exercising the gateway's forced-command allowlist |
+| `tests/multiplai-docker-test.sh` | Stub-docker harness asserting the argv `multiplai-docker` hands Compose (no daemon needed) |
 | `venv-sync-entrypoint.sh` | Entrypoint — syncs the Linux venv, then execs `claude` (or bash) |
 
 **Releasing (maintainers):** this repo is consumed at an immutable tag, not `main` — the full release flow (`release.sh`, its build and changelog gates, the kit `CONTAINER_REF` pin bump, `--kit` semantics) is documented in [CLAUDE.md](CLAUDE.md).

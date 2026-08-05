@@ -52,6 +52,16 @@ for a in "$@"; do echo "ARG:[$a]"; done
 EOF
 chmod +x "$FAKE_HOME/.local/bin/multiplai-gh-token"
 
+# multiplai-docker.py — same argv[0]-rewrite deal as gh-token: the container
+# types `multiplai-docker`, the gateway pins the absolute .py path. The stub
+# echoes $0 so a test can prove the rewrite rather than trusting it.
+cat > "$FAKE_HOME/.local/bin/multiplai-docker.py" <<'EOF'
+#!/usr/bin/env bash
+echo "STUB:multiplai-docker argv0=$0 cwd=$PWD"
+for a in "$@"; do echo "ARG:[$a]"; done
+EOF
+chmod +x "$FAKE_HOME/.local/bin/multiplai-docker.py"
+
 # Dirs exercising the cd prefix.
 mkdir -p "$TMP/gw test dir" "$TMP/gw (paren) dir" "$TMP/plain"
 
@@ -139,6 +149,59 @@ expect_deny  "gh-token flag after app name"   'multiplai-gh-token myapp --check'
 expect_deny  "gh-token metacharacter chain"   'multiplai-gh-token myapp; rm -rf /tmp/x' "metacharacter"
 expect_deny  "gh-token via xcsift pipe" \
   'multiplai-gh-token 2>&1 | xcsift --format toon --quiet' "xcsift pipe only allowed"
+
+echo "# multiplai-docker: fixed verb list, label-shaped arguments, no flags"
+expect_allow "docker up"            'multiplai-docker up dolce'                  "STUB:multiplai-docker"
+expect_allow "docker up --instance" 'multiplai-docker up dolce --instance wt1'   "ARG:[wt1]"
+expect_allow "docker down"          'multiplai-docker down dolce --instance a'   "ARG:[down]"
+expect_allow "docker ps"            'multiplai-docker ps dolce'                  "ARG:[ps]"
+expect_allow "docker ls bare"       'multiplai-docker ls'                        "ARG:[ls]"
+expect_allow "docker ls profile"    'multiplai-docker ls dolce'                  "ARG:[dolce]"
+expect_allow "docker logs with n"   'multiplai-docker logs dolce engine 200'     "ARG:[200]"
+expect_allow "docker restart"       'multiplai-docker restart dolce celery-beat' "ARG:[celery-beat]"
+expect_allow "docker build"         'multiplai-docker build dolce engine'        "ARG:[build]"
+expect_allow "docker reap"          'multiplai-docker reap-older-than 12'        "ARG:[12]"
+expect_allow "docker exec guest argv" \
+  'multiplai-docker exec dolce engine --instance wt1 -- python manage.py showmigrations' \
+  "ARG:[showmigrations]"
+# The branch pins argv[0] to the absolute install path (~/.local/bin is not on
+# the login PATH), and the installed name carries the .py suffix.
+expect_allow "docker runs from the absolute install path" \
+  'multiplai-docker up dolce' "argv0=$FAKE_HOME/.local/bin/multiplai-docker.py"
+
+# freeze is the trust step: host terminal only, never over the bridge.
+expect_deny "docker freeze denied at the gateway" \
+  'multiplai-docker freeze dolce -f /tmp/docker-compose.yml' "verb not allowed"
+expect_deny "docker unknown verb"     'multiplai-docker foo dolce'         "verb not allowed"
+expect_deny "docker no verb"          'multiplai-docker'                   "verb not allowed"
+expect_deny "docker profile slash"    'multiplai-docker up dolce/evil'     "invalid profile name"
+expect_deny "docker profile dotdot"   'multiplai-docker up ../../etc'      "invalid profile name"
+expect_deny "docker profile uppercase" 'multiplai-docker up Dolce'         "invalid profile name"
+expect_deny "docker profile too long" \
+  'multiplai-docker up aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "invalid profile name"
+expect_deny "docker instance slash"   'multiplai-docker up dolce --instance a/b' "invalid instance name"
+expect_deny "docker instance dotdot"  'multiplai-docker up dolce --instance ..'  "invalid instance name"
+expect_deny "docker instance uppercase" 'multiplai-docker up dolce --instance WT1' "invalid instance name"
+expect_deny "docker instance missing value" \
+  'multiplai-docker up dolce --instance'                 "--instance needs a value"
+expect_deny "docker leading-dash flag" 'multiplai-docker up dolce --volume /:/host' "flag not allowed"
+expect_deny "docker build ssh flag"    'multiplai-docker build dolce engine --ssh default' "flag not allowed"
+expect_deny "docker service token with slash" \
+  'multiplai-docker logs dolce ../engine'                "invalid token"
+expect_deny "docker guest flag after --" \
+  'multiplai-docker exec dolce engine -- python --version' "may not start with"
+expect_deny "docker guest charset after --" \
+  'multiplai-docker exec dolce engine -- python "a b"'    "guest argument not allowed"
+expect_deny "docker -- outside exec" \
+  'multiplai-docker up dolce -- whoami'                  "only for exec"
+# Core invariant regression: the metachar gate still fires before this branch.
+expect_deny "docker metacharacter chain" \
+  'multiplai-docker up dolce; rm -rf /tmp/x'             "metacharacter"
+# shellcheck disable=SC2016  # literal payload, see above
+expect_deny "docker command substitution" \
+  'multiplai-docker up $(whoami)'                        "metacharacter"
+expect_deny "docker via xcsift pipe" \
+  'multiplai-docker up dolce 2>&1 | xcsift --format toon --quiet' "xcsift pipe only allowed"
 
 echo
 echo "gateway-test: $PASS passed, $FAIL failed"
