@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.9] – 2026-08-06
+
 ### Added
 
 - **`multiplai-docker` — controlled Docker Compose access from a session
@@ -94,6 +96,8 @@ No `authorized_keys` change is needed — the existing forced command covers it.
   deliberately-unexpanded injection payloads in the gateway harness, and style
   findings in the Apple Containers experiment; each is now either fixed or
   carries a scoped directive saying why it stands.
+
+[0.9]: https://github.com/spikelab/multiplai-container/compare/v0.8...v0.9
 
 ## [0.8] – 2026-08-03
 
