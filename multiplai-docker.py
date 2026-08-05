@@ -302,6 +302,55 @@ def compose_base(conf: dict, compose_file: str, project: str) -> list[str]:
     ]
 
 
+def frozen_ports(conf: dict) -> dict:
+    """service -> [container ports], from the targets `freeze` stripped."""
+    try:
+        with open(conf["FROZEN"], "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    out = {}
+    for svc, body in (data.get("services") or {}).items():
+        ports = body.get("x-multiplai-ports") if isinstance(body, dict) else None
+        if isinstance(ports, list) and ports:
+            out[svc] = ports
+    return out
+
+
+def print_urls(conf: dict, project: str) -> None:
+    """After `up`, name the reachable URLs.
+
+    Host ports are stripped so instances can coexist, so the only route in is the
+    per-container hostname. Ports come from the frozen file (what the compose
+    author chose to publish), never from probing the container.
+    """
+    ports = frozen_ports(conf)
+    if not ports:
+        return
+    proc = run(
+        [
+            "docker",
+            "ps",
+            "--filter",
+            "label=com.docker.compose.project=" + project,
+            "--format",
+            '{{.Names}}\t{{.Label "com.docker.compose.service"}}',
+        ],
+        capture=True,
+    )
+    if proc.returncode != 0:
+        return
+    lines = []
+    for line in (proc.stdout or "").splitlines():
+        name, _, svc = line.partition("\t")
+        for port in ports.get(svc, []):
+            lines.append("  %-12s http://%s.orb.local:%d" % (svc, name, port))
+    if lines:
+        print("reachable (no host ports are published — use these hostnames):")
+        for line in sorted(lines):
+            print(line)
+
+
 def run(argv: list[str], capture: bool = False) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(argv, capture_output=capture, text=True, check=False)
@@ -449,9 +498,17 @@ def cmd_freeze(args: list[str]) -> int:
     if not services:
         raise Fail("resolved compose config has no services")
 
-    # Two deterministic transforms, and only these two.
+    # Deterministic freeze-time transforms, and only these.
     for svc in services.values():
-        svc.pop("ports", None)  # parallel instances must not publish host ports
+        # Parallel instances must not publish host ports. Keep the container-side
+        # targets as metadata so `up` can print reachable per-instance URLs.
+        targets = []
+        for port in svc.pop("ports", None) or []:
+            target = port.get("target") if isinstance(port, dict) else None
+            if isinstance(target, int) and target not in targets:
+                targets.append(target)
+        if targets:
+            svc["x-multiplai-ports"] = targets
         labels = svc.get("labels")
         if isinstance(labels, list):
             labels = {
@@ -462,6 +519,17 @@ def cmd_freeze(args: list[str]) -> int:
             labels = {}
         labels["multiplai.profile"] = name
         svc["labels"] = labels
+
+    # `compose config` RESOLVES top-level volume and network names against the
+    # source project ("dolceengine_mysql_data") and emits them as explicit
+    # `name:` keys. Frozen as-is, every instance would share one volume set and
+    # one network — no isolation at all. Drop the resolved name so Compose
+    # re-derives `<project>_<key>` per instance. `external: true` entries name a
+    # volume the stack does not own, so their name is meaningful: keep it.
+    for section in ("volumes", "networks"):
+        for entry in (data.get(section) or {}).values():
+            if isinstance(entry, dict) and not entry.get("external"):
+                entry.pop("name", None)
 
     json_path = _profile_path(name, ".json")
     conf_path = _profile_path(name, ".conf")
@@ -575,7 +643,10 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
         if verb == "up":
             if args:
                 raise Fail("up takes no extra arguments: %s" % " ".join(args))
-            return run_or_die(base + ["up", "-d"])
+            rc = run_or_die(base + ["up", "-d"])
+            if rc == 0:
+                print_urls(conf, project)
+            return rc
 
         if verb == "down":
             if args:

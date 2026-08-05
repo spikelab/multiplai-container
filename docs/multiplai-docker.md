@@ -48,14 +48,21 @@ multiplai-docker freeze dolce \
   -f ~/Documents/knowhere/PROJECTS/DolceBot/DolceEngine/docker-compose.dev.yml
 ```
 
-This runs `docker compose -f … config --format json` and applies exactly two
+This runs `docker compose -f … config --format json` and applies three
 deterministic transforms:
 
 1. **strips every service's `ports:`** — parallel instances must not publish host
    ports, and stripping them is what makes three simultaneous stacks possible.
-   Reach services by their OrbStack hostnames instead.
+   Reach services by their OrbStack hostnames instead; the stripped container-side
+   targets are kept as `x-multiplai-ports` so `up` can print those URLs.
 2. **stamps `multiplai.profile=<name>`** on every service, so `ls` and
    `reap-older-than` can find what this tool owns.
+3. **drops the resolved `name:` from top-level volumes and networks.** `compose
+   config` resolves them against the *source* project — `mysql_data` comes back
+   as `name: dolceengine_mysql_data` — and a frozen name is the same name for
+   every instance, i.e. one shared database and one shared network. Dropping it
+   lets Compose re-derive `<project>_<key>` per instance. `external: true`
+   entries name a volume the stack does not own, so their name is kept.
 
 It writes two mode-600 files:
 
@@ -93,8 +100,9 @@ file. Drift never fails and never causes a fallback to the workspace copy.
 ## Instances, worktrees and cleanup
 
 The compose project is always `<PROJECT_PREFIX>-<instance>`, so named volumes are
-per-instance too. Instances are therefore **ephemeral by design** and `down`
-always runs `down -v`.
+per-instance too — **provided the frozen file carries no resolved volume names**,
+which is transform 3 above. Instances are therefore **ephemeral by design** and
+`down` always runs `down -v`.
 
 If a directory named after the instance exists under `WORKTREE_ROOT`, the tool
 applies its **one runtime transform**: every `type: bind` volume whose source

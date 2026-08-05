@@ -64,7 +64,11 @@ cat > "$CONFIG_JSON" <<EOF
     },
     "celery-beat": {"image": "engine:dev"}
   },
-  "volumes": {"engine_static": {}}
+  "volumes": {
+    "engine_static": {"name": "dolceengine_engine_static"},
+    "shared": {"external": true, "name": "shared_prod"}
+  },
+  "networks": {"default": {"name": "dolceengine_default"}}
 }
 EOF
 
@@ -91,11 +95,21 @@ chmod +x "$STUB/docker"
 # run as ordinary commands by assert() below.
 cat > "$TMP/check_frozen.py" <<'EOF'
 import json, sys
-svcs = json.load(open(sys.argv[1]))["services"]
+data = json.load(open(sys.argv[1]))
+svcs = data["services"]
 assert not any("ports" in s for s in svcs.values()), "ports survived the freeze"
 assert svcs["engine"]["labels"]["multiplai.profile"] == "dolce"
 assert svcs["engine"]["labels"]["pre.existing"] == "keep", "freeze dropped an existing label"
 assert svcs["mysql"]["labels"]["multiplai.profile"] == "dolce"
+# The stripped host ports survive as metadata, so `up` can print URLs.
+assert svcs["engine"]["x-multiplai-ports"] == [8000], svcs["engine"]
+assert "x-multiplai-ports" not in svcs["celery-beat"], "invented ports for a portless service"
+# `compose config` resolves volume/network names against the SOURCE project;
+# frozen as-is, every instance would share one volume set and one network.
+assert "name" not in data["volumes"]["engine_static"], "project-scoped volume name survived"
+assert "name" not in data["networks"]["default"], "project-scoped network name survived"
+# …but an external volume names something the stack does not own: keep it.
+assert data["volumes"]["shared"]["name"] == "shared_prod", "dropped an external volume's name"
 EOF
 cat > "$TMP/check_rewrite.py" <<'EOF'
 import json, sys
@@ -119,6 +133,9 @@ md() {  # run the tool; sets OUT, ERR, RC
   ERR="$(cat "$TMP/err")"
 }
 last_argv() { tail -n 1 "$ARGV"; }
+# `up` is followed by the `docker ps` that print_urls runs, so the compose argv
+# under test is the last `up -d` line, not the last line.
+up_argv()   { grep -e ' up -d$' "$ARGV" | tail -n 1; }
 
 # Predicates, so every assertion is a COMMAND (keeps `$?`-after-a-condition,
 # and the subtle overwrite bug behind it, out of the harness entirely).
@@ -148,6 +165,10 @@ expect_argv() { # $1 name, $2 expected full argv line
   if [ "$(last_argv)" = "$2" ]; then ok "$1"
   else FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        want: $2"; echo "        got : $(last_argv)"; fi
 }
+expect_up_argv() { # $1 name, $2 expected full argv line for the compose `up`
+  if [ "$(up_argv)" = "$2" ]; then ok "$1"
+  else FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        want: $2"; echo "        got : $(up_argv)"; fi
+}
 
 FROZEN="$PROFILES/dolce.json"
 CONF="$PROFILES/dolce.conf"
@@ -173,9 +194,16 @@ assert "freeze refuses when it can see it came over SSH" \
   like "$RC|$ERR" '1|*not reachable over SSH*'
 
 echo "# up/down/ps — the frozen file, verbatim, when no worktree matches"
+# print_urls reads `docker ps` for the container names; the stub replays this.
+printf 'dolce-main-engine-1\tengine\ndolce-main-celery-beat-1\tcelery-beat\n' > "$PS_ROWS"
 expect_ok "up succeeds" up dolce
-expect_argv "up argv is exactly the frozen file + project" \
+expect_up_argv "up argv is exactly the frozen file + project" \
   "compose -f $FROZEN --project-directory $PROJ -p dolce-main up -d"
+assert "up prints the hostname URL for a service that had published ports" \
+  like "$OUT" '*http://dolce-main-engine-1.orb.local:8000*'
+assert "up prints no URL for a service that had none" \
+  unlike "$OUT" '*celery-beat-1.orb.local*'
+: > "$PS_ROWS"
 expect_ok "down succeeds" down dolce --instance b
 expect_argv "down passes -v and the per-instance project" \
   "compose -f $FROZEN --project-directory $PROJ -p dolce-b down -v"
@@ -184,18 +212,18 @@ expect_argv "ps argv" "compose -f $FROZEN --project-directory $PROJ -p dolce-b p
 
 echo "# the one runtime transform: worktree bind rewrite"
 expect_ok "up in a worktree instance" up dolce --instance wt1
-WT_COMPOSE="$(last_argv)"; WT_COMPOSE="${WT_COMPOSE#compose -f }"; WT_COMPOSE="${WT_COMPOSE%% *}"
+WT_COMPOSE="$(up_argv)"; WT_COMPOSE="${WT_COMPOSE#compose -f }"; WT_COMPOSE="${WT_COMPOSE%% *}"
 assert "worktree instance runs against a TEMP compose file, not the frozen one" \
   like "$WT_COMPOSE" "$TMP/tmp/multiplai-docker-dolce-wt1-*.json"
 assert "worktree instance keeps the per-instance project name" \
-  like "$(last_argv)" '*-p dolce-wt1 up -d'
+  like "$(up_argv)" '*-p dolce-wt1 up -d'
 assert "binds under BIND_ROOT are re-prefixed; the named volume is untouched" \
   "$PY" "$TMP/check_rewrite.py" "$CAPTURED" "$WT/wt1/app"
 assert "the temp compose file is cleaned up" test ! -e "$WT_COMPOSE"
 expect_fail "a bind with no counterpart in the worktree fails cleanly" \
   "has no counterpart" up dolce --instance wt2
 expect_ok "a non-worktree instance still uses the frozen file" up dolce --instance b
-expect_argv "non-worktree instance argv" \
+expect_up_argv "non-worktree instance argv" \
   "compose -f $FROZEN --project-directory $PROJ -p dolce-b up -d"
 
 echo "# logs / restart / build"
@@ -266,7 +294,7 @@ GOOD_SHA="$(grep '^SOURCE_SHA256=' "$CONF")"
 sed -i.bak 's/^SOURCE_SHA256=.*/SOURCE_SHA256=deadbeef/' "$CONF" && rm -f "$CONF.bak"
 expect_ok "up proceeds against a stale profile" up dolce
 assert "up warns on drift" like "$ERR" '*is stale*'
-expect_argv "a stale profile still runs the frozen file" \
+expect_up_argv "a stale profile still runs the frozen file" \
   "compose -f $FROZEN --project-directory $PROJ -p dolce-main up -d"
 sed -i.bak "s|^SOURCE_SHA256=.*|$GOOD_SHA|" "$CONF" && rm -f "$CONF.bak"
 md up dolce
