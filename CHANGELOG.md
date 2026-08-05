@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.9.1] – 2026-08-06
+
 ### Fixed
 
 - **`multiplai-docker freeze`: instances shared one volume set and one
@@ -38,6 +40,8 @@ sandboxed Claude Code container) and predates this changelog.
   the container-side targets of the ports it strips as `x-multiplai-ports`, and
   `up` prints `http://<container>.orb.local:<port>` per service. Ports come from
   the frozen file — the tool never probes a container.
+
+[0.9.1]: https://github.com/spikelab/multiplai-container/compare/v0.9...v0.9.1
 
 ## [0.9] – 2026-08-06
 
