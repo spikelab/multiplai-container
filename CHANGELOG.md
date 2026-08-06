@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.9.3] – 2026-08-06
+
 ### Fixed
 
 - **Worktree instances were impossible.** The bind rewrite refused any bind
@@ -34,6 +36,8 @@ sandboxed Claude Code container) and predates this changelog.
   hardcoding one. A literal date made that test pass only within 24h of the day
   it was written, then fail for reasons unrelated to the code (it did, the next
   morning).
+
+[0.9.3]: https://github.com/spikelab/multiplai-container/compare/v0.9.2...v0.9.3
 
 ## [0.9.2] – 2026-08-06
 
