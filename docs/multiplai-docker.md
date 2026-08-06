@@ -123,8 +123,13 @@ which is transform 3 above. Instances are therefore **ephemeral by design** and
 If a directory named after the instance exists under `WORKTREE_ROOT`, the tool
 applies its **one runtime transform**: every `type: bind` volume whose source
 sits under `BIND_ROOT` is re-prefixed into that worktree, and the result is
-written to a mode-600 temp file passed as `-f`. Named volumes are never touched;
-a rewritten source that does not exist is a clean failure. So three agents in
+written to a mode-600 temp file passed as `-f`. Named volumes are never touched.
+
+A bind whose counterpart is missing from the worktree is **created if the
+original is a directory** — gitignored runtime artifacts (`logs/`, `media/`) are
+absent from every fresh worktree by definition, and refusing them made worktree
+instances impossible rather than safe. A missing **file**, or a source that does
+not exist in the source tree either, is still a clean failure. So three agents in
 three worktrees can run
 
 ```

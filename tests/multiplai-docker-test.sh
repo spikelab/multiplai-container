@@ -32,7 +32,10 @@ CONFIG_JSON="$TMP/config.json"
 PS_ROWS="$TMP/ps.tsv"
 PROFILES="$FAKE_HOME/.local/share/multiplai/docker-profiles"
 
-mkdir -p "$STUB" "$FAKE_HOME" "$PROJ/app" "$WT/wt1/app" "$WT/wt2" "$TMP/tmp"
+mkdir -p "$STUB" "$FAKE_HOME" "$PROJ/app" "$PROJ/logs" "$WT/wt1/app" "$WT/wt2" "$TMP/tmp"
+# A bind source that is a FILE: it cannot be invented, so a worktree missing it
+# is still a clean failure (wt2). wt1 has one; wt2 deliberately does not.
+touch "$PROJ/.env" "$WT/wt1/.env"
 : > "$ARGV"
 : > "$PS_ROWS"
 
@@ -59,6 +62,8 @@ cat > "$CONFIG_JSON" <<EOF
       "labels": {"pre.existing": "keep"},
       "volumes": [
         {"type": "bind", "source": "$PROJ/app", "target": "/app"},
+        {"type": "bind", "source": "$PROJ/logs", "target": "/app/logs"},
+        {"type": "bind", "source": "$PROJ/.env", "target": "/app/.env"},
         {"type": "volume", "source": "engine_static", "target": "/static"}
       ]
     },
@@ -113,10 +118,16 @@ assert data["volumes"]["shared"]["name"] == "shared_prod", "dropped an external 
 EOF
 cat > "$TMP/check_rewrite.py" <<'EOF'
 import json, sys
+import os
 vols = json.load(open(sys.argv[1]))["services"]["engine"]["volumes"]
-binds = [v for v in vols if v["type"] == "bind"]
+binds = {v["target"]: v["source"] for v in vols if v["type"] == "bind"}
 named = [v for v in vols if v["type"] == "volume"]
-assert len(binds) == 1 and binds[0]["source"] == sys.argv[2], binds
+wt = sys.argv[2]
+assert binds["/app"] == wt + "/app", binds
+assert binds["/app/.env"] == wt + "/.env", binds
+# gitignored artifact dir: absent from the worktree, created rather than refused
+assert binds["/app/logs"] == wt + "/logs", binds
+assert os.path.isdir(wt + "/logs"), "the missing bind directory was not created"
 assert len(named) == 1 and named[0]["source"] == "engine_static", named
 EOF
 
@@ -228,7 +239,7 @@ assert "worktree instance runs against a TEMP compose file, not the frozen one" 
 assert "worktree instance keeps the per-instance project name" \
   like "$(up_argv)" '*-p dolce-wt1 up -d --wait*'
 assert "binds under BIND_ROOT are re-prefixed; the named volume is untouched" \
-  "$PY" "$TMP/check_rewrite.py" "$CAPTURED" "$WT/wt1/app"
+  "$PY" "$TMP/check_rewrite.py" "$CAPTURED" "$WT/wt1"
 assert "the temp compose file is cleaned up" test ! -e "$WT_COMPOSE"
 expect_fail "a bind with no counterpart in the worktree fails cleanly" \
   "has no counterpart" up dolce --instance wt2
@@ -283,8 +294,12 @@ expect_fail "unknown verb exits non-zero" "unknown verb"       foo dolce
 expect_fail "up takes no extra arguments" "no extra arguments" up dolce extra
 
 echo "# ls / reap read back profile + compose-project labels"
+# The fresh row's timestamp is generated, never hardcoded: a literal date makes
+# the reap test pass only within N hours of the day it was written, then fail
+# for reasons that have nothing to do with the code (it did, 2026-08-06).
+NOW_STAMP="$(date -u '+%Y-%m-%d %H:%M:%S +0000 UTC')"
 {
-  printf 'abc123\tdolce\tdolce-wt1\tengine\t2026-08-05 09:00:00 +0000 UTC\tUp 2 hours\n'
+  printf 'abc123\tdolce\tdolce-wt1\tengine\t%s\tUp 2 hours\n' "$NOW_STAMP"
   printf 'def456\tdolce\tdolce-old\tmysql\t2000-01-01 00:00:00 +0000 UTC\tUp 5 years\n'
 } > "$PS_ROWS"
 expect_ok "ls" ls

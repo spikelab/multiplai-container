@@ -16,6 +16,25 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Worktree instances were impossible.** The bind rewrite refused any bind
+  whose worktree counterpart did not exist, to catch a mis-rebased path. But a
+  gitignored runtime-artifact directory is absent from every fresh worktree *by
+  definition* — DolceEngine binds `./logs`, which `.gitignore` excludes — so
+  `up <profile> --instance <worktree>` failed every time, on the one runtime
+  transform the tool exists for. It now mirrors the original: an existing
+  source **directory** gets its counterpart created (Docker would create it
+  anyway, as root); a missing **file**, or a source absent from the source tree
+  too, is still a clean failure. Found by the first real worktree bring-up.
+
+### Testing
+
+- The reap fixture generated a "fresh" container timestamp instead of
+  hardcoding one. A literal date made that test pass only within 24h of the day
+  it was written, then fail for reasons unrelated to the code (it did, the next
+  morning).
+
 ## [0.9.2] – 2026-08-06
 
 ### Changed
