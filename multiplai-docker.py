@@ -271,10 +271,22 @@ def compose_file_for(conf: dict, instance: str, stack: list) -> str:
             if new is None:
                 continue
             if not os.path.exists(new):
-                raise Fail(
-                    "worktree '%s' has no %s (bind source %s has no counterpart)"
-                    % (instance, new, src)
-                )
+                # A gitignored runtime-artifact directory (logs/, media/) is
+                # ABSENT from every fresh worktree by definition, so refusing
+                # here made worktree instances impossible rather than safe —
+                # DolceEngine binds ./logs, which .gitignore excludes, so every
+                # `up --instance <worktree>` failed. Mirror the original: if it
+                # is a directory, create the counterpart (Docker would create it
+                # anyway, as root). A missing FILE is still a clean failure —
+                # one cannot be invented, and a bind source that does not exist
+                # in the source tree either is a genuine misconfiguration.
+                if os.path.isdir(src):
+                    os.makedirs(new, exist_ok=True)
+                else:
+                    raise Fail(
+                        "worktree '%s' has no %s (bind source %s has no counterpart)"
+                        % (instance, new, src)
+                    )
             vol["source"] = new
 
     fd, path = tempfile.mkstemp(
