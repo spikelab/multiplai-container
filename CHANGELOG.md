@@ -16,6 +16,24 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **`ast-grep` 0.45.1 is on PATH in the image** (`npm install -g
+  @ast-grep/cli`, alongside the existing LSP servers). It is the structural
+  search tier the image was missing: an audit of 111,780 real tool calls found
+  **zero** symbol-level lookups — 100% of code navigation was lexical `grep` —
+  and the "grep for a name, then `Read` the whole file to see the definition"
+  loop is why the `Read` tool accounts for 72% of every byte of tool output
+  that reaches a context window. Measured against a neighbouring repo:
+  `ast-grep --pattern 'def NAME($$$)' --lang py` returns the definition node in
+  **2.6 KB** where reading the containing file costs **53.8 KB**.
+
+  It does not replace `grep`, and the rules shipped by the kit say so: `grep`
+  is still cheaper for locating a bare name (264 B for the same question) and
+  is the only option for prose, logs, and config. `ast-grep` earns its place on
+  structural questions, and on the languages the two installed LSP servers
+  (Python, TypeScript) do not cover — Swift, Go, Rust, shell.
+
 ## [0.9.3] – 2026-08-06
 
 ### Fixed
