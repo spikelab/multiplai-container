@@ -117,7 +117,15 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
 # actually reaches for.
 RUN npm install -g vite@8.1.3 ccusage@20.0.14 @usebruno/cli@3.5.1 \
         pyright@1.1.411 typescript-language-server@5.3.0 typescript@6.0.3 \
-        @ast-grep/cli@0.45.1 \
+    && npm cache clean --force
+
+# ast-grep gets its own prefix because @ast-grep/cli ships a second bin, `sg`,
+# which collides with /usr/bin/sg (the setgroup utility from the login
+# package) at npm's /usr global prefix — npm rightly refuses with EEXIST, and
+# --force would overwrite a system binary. Only the ast-grep name is exposed;
+# the `sg` shorthand is deliberately left buried.
+RUN npm install -g --prefix /opt/ast-grep @ast-grep/cli@0.45.1 \
+    && ln -s /opt/ast-grep/bin/ast-grep /usr/local/bin/ast-grep \
     && npm cache clean --force
 
 # Claude Code — install.sh takes the version as its argument, so CLAUDE_VERSION

@@ -18,8 +18,15 @@ sandboxed Claude Code container) and predates this changelog.
 
 ### Added
 
-- **`ast-grep` 0.45.1 is on PATH in the image** (`npm install -g
-  @ast-grep/cli`, alongside the existing LSP servers). It is the structural
+- **`ast-grep` 0.45.1 is on PATH in the image** (`npm install -g --prefix
+  /opt/ast-grep @ast-grep/cli`, symlinked next to the existing LSP servers).
+  The private prefix is not decoration: the package also ships an `sg` bin,
+  which at npm's `/usr` global prefix collides with `/usr/bin/sg` (the
+  setgroup utility from the `login` package) and fails the build with
+  `EEXIST` — and `--force` would overwrite a system binary. Only the
+  `ast-grep` name is exposed; the `sg` shorthand stays buried.
+
+  It is the structural
   search tier the image was missing: an audit of 111,780 real tool calls found
   **zero** symbol-level lookups — 100% of code navigation was lexical `grep` —
   and the "grep for a name, then `Read` the whole file to see the definition"
