@@ -104,9 +104,20 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
     && cp /root/.bun/bin/bunx /usr/local/bin/bunx \
     && rm -rf /root/.bun
 
-# Vite + ccusage + LSP servers globally (all version-pinned), clean npm cache
+# Vite + ccusage + LSP servers + ast-grep globally (all version-pinned), clean
+# npm cache.
+#
+# ast-grep is the structural-search tier the image was missing. An audit of
+# 111,780 real tool calls found zero symbol-level lookups: 100% of code
+# navigation was lexical grep, and the "grep for a name, then Read the whole
+# file to see the definition" loop is why the Read tool accounts for 72% of
+# every byte of tool output that reaches a context window. The LSP servers
+# below cover Python and TypeScript only; ast-grep is language-agnostic
+# (Swift, Go, Rust, shell) and composes with pipes, which is what the agent
+# actually reaches for.
 RUN npm install -g vite@8.1.3 ccusage@20.0.14 @usebruno/cli@3.5.1 \
         pyright@1.1.411 typescript-language-server@5.3.0 typescript@6.0.3 \
+        @ast-grep/cli@0.45.1 \
     && npm cache clean --force
 
 # Claude Code — install.sh takes the version as its argument, so CLAUDE_VERSION
