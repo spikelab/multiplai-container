@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.9.4] – 2026-08-08
+
 ### Added
 
 - **`ast-grep` 0.45.1 is on PATH in the image** (`npm install -g --prefix
@@ -40,6 +42,8 @@ sandboxed Claude Code container) and predates this changelog.
   is the only option for prose, logs, and config. `ast-grep` earns its place on
   structural questions, and on the languages the two installed LSP servers
   (Python, TypeScript) do not cover — Swift, Go, Rust, shell.
+
+[0.9.4]: https://github.com/spikelab/multiplai-container/compare/v0.9.3...v0.9.4
 
 ## [0.9.3] – 2026-08-06
 
