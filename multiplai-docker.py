@@ -44,7 +44,8 @@ always passes `-v`. Agents `down` what they `up`; `reap-older-than` catches
 leaks; `ls` shows what is live in the meantime.
 
 Instance identity — a deliberate design note. The design allows exactly ONE
-runtime transform of the frozen file (the worktree bind rewrite below), so the
+runtime transform of the frozen file (the worktree rewrite below — bind sources
+and build contexts, one prefix swap), so the
 per-instance label cannot be injected at run time. Instead `freeze` bakes
 `multiplai.profile=<name>` onto every service, and the instance travels in the
 compose project name, which Compose itself stamps on every container as
@@ -217,7 +218,7 @@ def source_digest(paths: list[str]) -> str:
 
 
 # --------------------------------------------------------------------------
-# the one runtime transform: worktree bind rewrite
+# the one runtime transform: worktree rewrite (bind sources + build contexts)
 # --------------------------------------------------------------------------
 
 
@@ -235,22 +236,65 @@ def _worktree_for(conf: dict, instance: str) -> str | None:
     return real_cand
 
 
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def _rebase(source: str, bind_root: str, worktree: str) -> str | None:
     """Return the worktree-relative twin of `source`, or None if not under root."""
     if source == bind_root:
         return worktree
-    if source.startswith(bind_root.rstrip(os.sep) + os.sep):
+    if _under(source, bind_root):
         return os.path.join(worktree, os.path.relpath(source, bind_root))
     return None
+
+
+def _build_paths(svc: dict):
+    """The absolute filesystem paths in a service's `build` section.
+
+    Yields (label, build_dict, key) so a caller can rewrite in place. A
+    relative `dockerfile` follows its context; a git-URL context is not a
+    filesystem path: both are skipped.
+    """
+    build = svc.get("build")
+    if not isinstance(build, dict):
+        return
+    for key in ("context", "dockerfile"):
+        path = build.get(key)
+        if isinstance(path, str) and os.path.isabs(path):
+            yield "build %s" % key, build, key
+
+
+def _paths_outside_bind_root(services: dict, bind_root: str) -> list[str]:
+    """Bind sources and build paths that a worktree rewrite could never cover."""
+    out = []
+    for name, svc in services.items():
+        for vol in svc.get("volumes") or []:
+            if not isinstance(vol, dict) or vol.get("type") != "bind":
+                continue
+            src = vol.get("source")
+            if isinstance(src, str) and not _under(src, bind_root):
+                out.append("%s (bind, service %s)" % (src, name))
+        for label, build, key in _build_paths(svc):
+            if not _under(build[key], bind_root):
+                out.append("%s (%s, service %s)" % (build[key], label, name))
+    return out
 
 
 def compose_file_for(conf: dict, instance: str, stack: list) -> str:
     """The `-f` argument for this instance.
 
     Returns the frozen file untouched unless a worktree named after the instance
-    exists, in which case every bind under BIND_ROOT is re-prefixed into it and
-    the result is written to a mode-600 temp file (registered on `stack` for
-    cleanup). Named volumes are never touched.
+    exists, in which case every bind source AND build path under BIND_ROOT is
+    re-prefixed into it and the result is written to a mode-600 temp file
+    (registered on `stack` for cleanup). Named volumes are never touched.
+
+    Paths outside BIND_ROOT cannot follow the worktree; they run against the
+    live tree, and that is reported loudly on stderr — a worktree instance
+    silently mounting (or baking an image from) the live checkout is exactly
+    the failure this rewrite exists to prevent (seen 2026-08-08: BIND_ROOT
+    covered DolceEngine only, so DolceFront binds pointed at the real repo and
+    a grading run would have graded the wrong code).
     """
     worktree = _worktree_for(conf, instance)
     bind_root = conf.get("BIND_ROOT")
@@ -260,7 +304,32 @@ def compose_file_for(conf: dict, instance: str, stack: list) -> str:
     with open(conf["FROZEN"], "r", encoding="utf-8") as fh:
         data = json.load(fh)
 
-    for svc in (data.get("services") or {}).values():
+    services = data.get("services") or {}
+    # Scan BEFORE rewriting: a rebased path is no longer under BIND_ROOT and
+    # would be misreported as outside it.
+    outside = _paths_outside_bind_root(services, bind_root)
+    for svc in services.values():
+        # Build paths FIRST: images are part of the instance too (DolceEngine
+        # pip-installs requirements.txt at image build time, so a context left
+        # at the frozen path would bake the live tree's dependencies into an
+        # image that then runs worktree code). Also ordering matters: the bind
+        # loop below auto-creates missing directories, and a build context is
+        # often also a bind source (`.:/app`) — checked after the bind loop, a
+        # genuinely absent context would have just been created empty and the
+        # failure deferred to an inscrutable `docker build` error. A build
+        # context is source code: absent from the worktree means misassembled,
+        # so it is a clean failure, never invented.
+        for label, build, key in _build_paths(svc):
+            new = _rebase(build[key], bind_root, worktree)
+            if new is None:
+                continue
+            if not os.path.exists(new):
+                raise Fail(
+                    "worktree '%s' has no %s (%s %s has no counterpart)"
+                    % (instance, new, label, build[key])
+                )
+            build[key] = new
+
         for vol in svc.get("volumes") or []:
             if not isinstance(vol, dict) or vol.get("type") != "bind":
                 continue
@@ -288,6 +357,14 @@ def compose_file_for(conf: dict, instance: str, stack: list) -> str:
                         % (instance, new, src)
                     )
             vol["source"] = new
+
+    if outside:
+        warn(
+            "worktree instance '%s': %d path(s) outside BIND_ROOT (%s) still "
+            "point at the LIVE tree, not the worktree:\n  %s\nre-freeze with "
+            "--bind-root at their common parent to make them follow instances."
+            % (instance, len(outside), bind_root, "\n  ".join(outside))
+        )
 
     fd, path = tempfile.mkstemp(
         prefix="multiplai-docker-%s-%s-" % (conf["_name"], instance), suffix=".json"
@@ -575,6 +652,15 @@ def cmd_freeze(args: list[str]) -> int:
     print("  %s" % json_path)
     print("  %s" % conf_path)
     print("  services: %s" % " ".join(sorted(services)))
+    outside = _paths_outside_bind_root(services, bind_root)
+    if outside:
+        print("  NOTE: %d path(s) fall outside BIND_ROOT (%s)" % (len(outside), bind_root))
+        for item in outside:
+            print("    %s" % item)
+        print(
+            "  worktree instances will mount/build these from the LIVE tree; "
+            "re-freeze with --bind-root at their common parent to cover them."
+        )
     print("review the frozen JSON now — this is the trust step.")
     return 0
 

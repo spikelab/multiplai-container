@@ -32,10 +32,16 @@ CONFIG_JSON="$TMP/config.json"
 PS_ROWS="$TMP/ps.tsv"
 PROFILES="$FAKE_HOME/.local/share/multiplai/docker-profiles"
 
-mkdir -p "$STUB" "$FAKE_HOME" "$PROJ/app" "$PROJ/logs" "$WT/wt1/app" "$WT/wt2" "$TMP/tmp"
+mkdir -p "$STUB" "$FAKE_HOME" "$PROJ/app" "$PROJ/logs" "$WT/wt1/app" \
+  "$WT/wt2/app" "$WT/wt3" "$TMP/outside" "$TMP/tmp"
 # A bind source that is a FILE: it cannot be invented, so a worktree missing it
 # is still a clean failure (wt2). wt1 has one; wt2 deliberately does not.
-touch "$PROJ/.env" "$WT/wt1/.env"
+# wt3 has no app/ at all: the BUILD CONTEXT is missing, which must fail before
+# the bind loop can auto-create the directory and defer the error to docker.
+# outside/ holds a bind source that BIND_ROOT does not cover: never rewritten,
+# reported at freeze time and warned about on worktree `up`.
+touch "$PROJ/.env" "$WT/wt1/.env" "$TMP/outside/shared.conf"
+touch "$PROJ/app/Dockerfile" "$WT/wt1/app/Dockerfile" "$WT/wt2/app/Dockerfile"
 : > "$ARGV"
 : > "$PS_ROWS"
 
@@ -58,12 +64,14 @@ cat > "$CONFIG_JSON" <<EOF
     },
     "engine": {
       "image": "engine:dev",
+      "build": {"context": "$PROJ/app", "dockerfile": "$PROJ/app/Dockerfile"},
       "ports": [{"mode": "ingress", "target": 8000, "published": "8000", "protocol": "tcp"}],
       "labels": {"pre.existing": "keep"},
       "volumes": [
         {"type": "bind", "source": "$PROJ/app", "target": "/app"},
         {"type": "bind", "source": "$PROJ/logs", "target": "/app/logs"},
         {"type": "bind", "source": "$PROJ/.env", "target": "/app/.env"},
+        {"type": "bind", "source": "$TMP/outside/shared.conf", "target": "/etc/shared.conf"},
         {"type": "volume", "source": "engine_static", "target": "/static"}
       ]
     },
@@ -119,15 +127,21 @@ EOF
 cat > "$TMP/check_rewrite.py" <<'EOF'
 import json, sys
 import os
-vols = json.load(open(sys.argv[1]))["services"]["engine"]["volumes"]
+engine = json.load(open(sys.argv[1]))["services"]["engine"]
+vols = engine["volumes"]
 binds = {v["target"]: v["source"] for v in vols if v["type"] == "bind"}
 named = [v for v in vols if v["type"] == "volume"]
-wt = sys.argv[2]
+wt, outside = sys.argv[2], sys.argv[3]
 assert binds["/app"] == wt + "/app", binds
 assert binds["/app/.env"] == wt + "/.env", binds
 # gitignored artifact dir: absent from the worktree, created rather than refused
 assert binds["/app/logs"] == wt + "/logs", binds
 assert os.path.isdir(wt + "/logs"), "the missing bind directory was not created"
+# a bind outside BIND_ROOT cannot follow the worktree: left at the live path
+assert binds["/etc/shared.conf"] == outside + "/shared.conf", binds
+# images are part of the instance: build context and dockerfile follow too
+assert engine["build"]["context"] == wt + "/app", engine["build"]
+assert engine["build"]["dockerfile"] == wt + "/app/Dockerfile", engine["build"]
 assert len(named) == 1 and named[0]["source"] == "engine_static", named
 EOF
 
@@ -196,6 +210,11 @@ assert "freeze strips ports from every service and labels them" \
 assert "conf records the service list" grep -q "^SERVICES=celery-beat engine mysql$" "$CONF"
 assert "conf derives WORKTREE_ROOT from the tree" grep -q "^WORKTREE_ROOT=$WT$" "$CONF"
 assert "conf derives BIND_ROOT from the project dir" grep -q "^BIND_ROOT=$PROJ$" "$CONF"
+assert "freeze counts the paths BIND_ROOT does not cover" \
+  like "$OUT" '*NOTE: 1 path(s) fall outside BIND_ROOT*'
+assert "freeze names the out-of-root bind and its service" \
+  like "$OUT" "*$TMP/outside/shared.conf (bind, service engine)*"
+assert "freeze points at the --bind-root remedy" like "$OUT" '*--bind-root*'
 
 echo "# freeze is a host-terminal act"
 OUT=""; RC=0
@@ -208,6 +227,8 @@ echo "# up/down/ps — the frozen file, verbatim, when no worktree matches"
 # print_urls reads `docker ps` for the container names; the stub replays this.
 printf 'dolce-main-engine-1\tengine\ndolce-main-celery-beat-1\tcelery-beat\n' > "$PS_ROWS"
 expect_ok "up succeeds" up dolce
+assert "no out-of-root warning when no worktree is involved" \
+  unlike "$ERR" '*outside BIND_ROOT*'
 expect_up_argv "up argv is exactly the frozen file + project" \
   "compose -f $FROZEN --project-directory $PROJ -p dolce-main up -d --wait --wait-timeout 600"
 assert "up prints the hostname URL for a service that had published ports" \
@@ -231,18 +252,23 @@ expect_argv "down passes -v and the per-instance project" \
 expect_ok "ps succeeds" ps dolce --instance b
 expect_argv "ps argv" "compose -f $FROZEN --project-directory $PROJ -p dolce-b ps"
 
-echo "# the one runtime transform: worktree bind rewrite"
+echo "# the one runtime transform: worktree rewrite (binds + build paths)"
 expect_ok "up in a worktree instance" up dolce --instance wt1
 WT_COMPOSE="$(up_argv)"; WT_COMPOSE="${WT_COMPOSE#compose -f }"; WT_COMPOSE="${WT_COMPOSE%% *}"
+assert "worktree instance warns about the bind BIND_ROOT does not cover" \
+  like "$ERR" '*outside BIND_ROOT*LIVE tree*'
+assert "the warning names the live path" like "$ERR" "*$TMP/outside/shared.conf*"
 assert "worktree instance runs against a TEMP compose file, not the frozen one" \
   like "$WT_COMPOSE" "$TMP/tmp/multiplai-docker-dolce-wt1-*.json"
 assert "worktree instance keeps the per-instance project name" \
   like "$(up_argv)" '*-p dolce-wt1 up -d --wait*'
-assert "binds under BIND_ROOT are re-prefixed; the named volume is untouched" \
-  "$PY" "$TMP/check_rewrite.py" "$CAPTURED" "$WT/wt1"
+assert "binds and build paths under BIND_ROOT are re-prefixed; named volume and out-of-root bind untouched" \
+  "$PY" "$TMP/check_rewrite.py" "$CAPTURED" "$WT/wt1" "$TMP/outside"
 assert "the temp compose file is cleaned up" test ! -e "$WT_COMPOSE"
 expect_fail "a bind with no counterpart in the worktree fails cleanly" \
-  "has no counterpart" up dolce --instance wt2
+  "bind source" up dolce --instance wt2
+expect_fail "a missing build context fails cleanly, before the bind loop invents the directory" \
+  "build context" up dolce --instance wt3
 expect_ok "a non-worktree instance still uses the frozen file" up dolce --instance b
 expect_up_argv "non-worktree instance argv" \
   "compose -f $FROZEN --project-directory $PROJ -p dolce-b up -d --wait --wait-timeout 600"
