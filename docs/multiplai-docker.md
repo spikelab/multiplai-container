@@ -45,8 +45,12 @@ over SSH.
 ```bash
 multiplai-docker freeze dolce \
   -f ~/Documents/knowhere/PROJECTS/DolceBot/DolceEngine/docker-compose.yml \
-  -f ~/Documents/knowhere/PROJECTS/DolceBot/DolceEngine/docker-compose.dev.yml
+  -f ~/Documents/knowhere/PROJECTS/DolceBot/DolceEngine/docker-compose.dev.yml \
+  --bind-root ~/Documents/knowhere/PROJECTS/DolceBot
 ```
+
+(`--bind-root` sits at DolceBot, not DolceEngine, because the dev overlay also
+binds the sibling `../DolceFront` — see the multi-repo note below.)
 
 This runs `docker compose -f … config --format json` and applies three
 deterministic transforms:
@@ -83,7 +87,7 @@ PROJECT_PREFIX=dolce               # compose project is <prefix>-<instance>
 SERVICES=celery celery-beat engine front mysql redis
 SOURCE_FILES=…yml:…dev.yml         # hashed for the drift warning only
 SOURCE_SHA256=…
-BIND_ROOT=…/DolceEngine            # binds under here follow the worktree
+BIND_ROOT=…/DolceBot               # binds/build paths under here follow the worktree
 WORKTREE_ROOT=…/knowhere/.worktrees
 ```
 
@@ -91,6 +95,14 @@ WORKTREE_ROOT=…/knowhere/.worktrees
 `WORKTREE_ROOT` to the nearest ancestor holding a `.worktrees/` directory;
 `PROJECT_PREFIX` to the profile name. Override any of them with
 `--project-dir`, `--bind-root`, `--worktree-root`, `--prefix`.
+
+**Multi-repo stacks need an explicit `--bind-root`.** When the compose files
+reference a sibling checkout (DolceEngine's dev overlay binds `../DolceFront`),
+the default — the first `-f` file's directory — covers only the one repo, and
+the sibling's paths stay on the live tree for every worktree instance. Pass
+`--bind-root` at the common parent (`…/DolceBot`) so both repos follow the
+instance. `freeze` prints a `NOTE:` listing every bind/build path that falls
+outside `BIND_ROOT` — an empty listing is the thing to verify at the trust step.
 
 Re-run `freeze` whenever the workspace compose files change. Sessions cannot:
 when the recorded hash no longer matches, `up`/`build` print a **stderr warning**
@@ -121,16 +133,29 @@ which is transform 3 above. Instances are therefore **ephemeral by design** and
 `down` always runs `down -v`.
 
 If a directory named after the instance exists under `WORKTREE_ROOT`, the tool
-applies its **one runtime transform**: every `type: bind` volume whose source
-sits under `BIND_ROOT` is re-prefixed into that worktree, and the result is
-written to a mode-600 temp file passed as `-f`. Named volumes are never touched.
+applies its **one runtime transform**: every `type: bind` volume source and
+every `build` context (and absolute `dockerfile`) that sits under `BIND_ROOT`
+is re-prefixed into that worktree, and the result is written to a mode-600 temp
+file passed as `-f`. Named volumes are never touched. Build paths follow the
+worktree because **images are part of the instance too**: DolceEngine
+pip-installs `requirements.txt` at image build time, so building from the
+frozen path would bake the live tree's dependencies into an image that then
+runs worktree code.
 
 A bind whose counterpart is missing from the worktree is **created if the
 original is a directory** — gitignored runtime artifacts (`logs/`, `media/`) are
 absent from every fresh worktree by definition, and refusing them made worktree
 instances impossible rather than safe. A missing **file**, or a source that does
-not exist in the source tree either, is still a clean failure. So three agents in
-three worktrees can run
+not exist in the source tree either, is still a clean failure. A missing **build
+context** is always a clean failure: it is source code, so its absence means the
+worktree was misassembled, and inventing an empty directory would only defer the
+error to an inscrutable `docker build`.
+
+Paths **outside `BIND_ROOT`** cannot follow any worktree — they mount (or build
+from) the live tree. `up`/`build` on a worktree instance warn about them on
+stderr, naming each path and the `--bind-root` remedy, because a worktree
+instance silently running against the live checkout is exactly the failure this
+transform exists to prevent. So three agents in three worktrees can run
 
 ```
 multiplai-docker up dolce --instance wt1     # binds …/.worktrees/wt1/…

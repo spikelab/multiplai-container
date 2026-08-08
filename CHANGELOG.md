@@ -16,6 +16,25 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`multiplai-docker`: the worktree rewrite now covers `build` paths, not
+  just binds.** A worktree instance previously built its images from the
+  frozen (live-tree) context — DolceEngine pip-installs `requirements.txt` at
+  image build time, so a worktree that changed dependencies silently ran
+  against the live tree's packages. `build.context` (and an absolute
+  `build.dockerfile`) under `BIND_ROOT` now follow the instance worktree; a
+  context missing from the worktree is a clean failure, checked *before* the
+  bind loop can auto-create the directory and defer the error to an
+  inscrutable `docker build`.
+- **`multiplai-docker`: paths outside `BIND_ROOT` are loud instead of
+  silent.** Bind sources and build paths the rewrite could never cover stayed
+  on the live tree without a word — exactly how a DolceBot worktree instance
+  ended up mounting the real `DolceFront` (`BIND_ROOT` had defaulted to
+  `DolceEngine/`, the first `-f` file's directory, 2026-08-08). `freeze` now
+  prints a `NOTE:` listing every such path, and `up`/`build` on a worktree
+  instance warn on stderr — both pointing at the `--bind-root` remedy.
+
 ## [0.9.4] – 2026-08-08
 
 ### Added
