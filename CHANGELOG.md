@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.9.5] – 2026-08-08
+
 ### Fixed
 
 - **`multiplai-docker`: the worktree rewrite now covers `build` paths, not
@@ -34,6 +36,8 @@ sandboxed Claude Code container) and predates this changelog.
   `DolceEngine/`, the first `-f` file's directory, 2026-08-08). `freeze` now
   prints a `NOTE:` listing every such path, and `up`/`build` on a worktree
   instance warn on stderr — both pointing at the `--bind-root` remedy.
+
+[0.9.5]: https://github.com/spikelab/multiplai-container/compare/v0.9.4...v0.9.5
 
 ## [0.9.4] – 2026-08-08
 
