@@ -99,7 +99,11 @@ inside the container. Invariants to preserve:
 
 - **Never resolve the repo's own hooks with `git rev-parse --git-path hooks`.**
   That honours `core.hooksPath` and returns the dispatcher's own directory —
-  the hook would exec itself forever. Use `--git-dir` and append `/hooks`.
+  the hook would exec itself forever. And never `--git-dir` either: a linked
+  worktree's git dir (`.git/worktrees/<name>`) has no `hooks/`, so repo-local
+  hooks silently stop running from worktrees. The one correct resolver is
+  `git rev-parse --path-format=absolute --git-common-dir` + `/hooks` — the
+  same call `check-hookspath` uses; keep the two in lockstep.
 - **Keep chaining to `.git/hooks/<name>`.** `core.hooksPath` *replaces*
   `.git/hooks`; it is not additive. Any hook name missing from the symlink loop
   in the Dockerfile is a repo-local hook silently disabled — which is why

@@ -16,6 +16,58 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **git-hooks: `git merge` and `git am` commit paths are now secret-scanned.**
+  A clean merge's auto-created commit and each commit `git am` creates used to
+  exec straight through the dispatcher unscanned — only pre-push caught the
+  result. `pre-merge-commit` and `pre-applypatch` now run the same staged
+  scan as `pre-commit` (at hook time the incoming content is already in the
+  index, so index-vs-HEAD is exactly the new commit). Commit paths git offers
+  no pre-commit-class hook for (`cherry-pick`, `revert`, merge-backend
+  `rebase`) are documented as a known limit in the dispatch header, with
+  pre-push as their backstop.
+- **Dockerfile: build-time assertion that the `pre-commit` and `pre-push`
+  dispatcher symlinks exist.** A typo in the symlink loop would previously
+  ship an image whose secret gate never fires, with nothing failing
+  anywhere; `test -L` on both scanning hooks now fails the build instead.
+
+### Changed
+
+- **The entrypoint's hookspath drift scan runs only for `claude` sessions.**
+  `venv-sync-entrypoint.sh` ran `check-hookspath` on every start of the
+  image — including the launcher's post-exit drain container, whose stdio is
+  discarded (`docker run -d … >/dev/null 2>&1`), and hub driver containers.
+  The scan is a warning for a human; a walk of the workspace nobody can see
+  is pure cost. It is now gated on the entrypoint's first argument being
+  `claude` (what the launcher passes for interactive sessions, and the
+  image's default CMD).
+
+### Fixed
+
+- **git-hooks: repo-local hooks now run from linked worktrees, and a failed
+  repo lookup no longer skips the secret scan.** The dispatcher resolved the
+  repo's own hooks via `git rev-parse --git-dir`, which in a linked worktree
+  returns `.git/worktrees/<name>` — a directory with no `hooks/`; git itself
+  resolves hooks through the common dir. So a repo-local vetoing `pre-commit`
+  or `pre-push` silently never ran for commits made from a worktree — the
+  default working mode for agent sessions. The dispatcher now resolves via
+  `git rev-parse --path-format=absolute --git-common-dir`, the same call
+  `check-hookspath` already used (the two are now cross-referenced so they
+  cannot diverge again). The same line's `|| exit 0` was also the
+  dispatcher's one fail-open path: any `rev-parse` failure skipped the
+  gitleaks scan entirely. A failed lookup now only empties the chain target;
+  the scan runs regardless. `tests/git-hooks-test.sh` grows a linked-worktree
+  fixture pinning both halves.
+- **`check-hookspath` announces when its depth bound truncates the scan.**
+  The `-maxdepth 7` cost ceiling silently hid any repo nested deeper — a
+  clean report was indistinguishable from a complete one. The scan now emits
+  a one-line stderr note when unseen territory exists past the bound (any
+  directory or `.git` file at depth 8), detected by a probe that mirrors the
+  main walk's pruning one level deeper — it still never descends into a
+  `.git`. A fully covered tree stays silent, so the note is never ambient
+  noise at container start.
+
 ## [0.9.5] – 2026-08-08
 
 ### Fixed

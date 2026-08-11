@@ -133,7 +133,14 @@ fi
 # repo-local core.hooksPath (husky/lefthook-style) outranks system config and
 # silently un-gates that repo. Detection is the compensating control: warn at
 # container start, keep going.
-if [ -x /usr/local/share/git-hooks/check-hookspath ]; then
+#
+# Interactive `claude` sessions only ($1 is the command this entrypoint will
+# exec; the launcher passes `claude …`, and the image's default CMD is
+# `claude`). The same image also serves dshell (`bash`), hub driver
+# containers (the hub's runner), and the launcher's post-exit drain container
+# (`bash -c …` with stdio discarded) — a workspace walk whose warning nobody
+# can see is a scan not worth paying for.
+if [ "${1:-}" = claude ] && [ -x /usr/local/share/git-hooks/check-hookspath ]; then
     /usr/local/share/git-hooks/check-hookspath "${WORKSPACE:-}" || true
 fi
 

@@ -7,6 +7,8 @@
 # the behaviour that matters:
 #
 #   * a secret in the staged diff blocks the commit
+#   * a secret arriving via a clean `git merge` or `git am` blocks that
+#     commit too (pre-merge-commit / pre-applypatch run the same staged scan)
 #   * a secret in the pushed range blocks the push (the --no-verify backstop,
 #     and the only gate private repos get)
 #   * the secret VALUE never reaches stdout/stderr (redaction) — a leak report
@@ -15,6 +17,10 @@
 #   * repo-local hooks still run, and pre-push still receives its stdin ref
 #     lines — hooksPath replaces .git/hooks, so this delegation is the only
 #     thing keeping existing per-repo hooks alive
+#   * repo-local hooks still run from a LINKED WORKTREE, and the scan runs
+#     there too — the hooks dir must resolve via --git-common-dir, because a
+#     worktree's own git dir has no hooks/ (and a failed lookup must not
+#     skip the scan)
 #   * the dispatcher does not exec itself (hooksPath must not be resolved via
 #     `git rev-parse --git-path hooks`)
 #   * a missing gitleaks binary fails CLOSED
@@ -61,7 +67,7 @@ mkdir -p "$HOOKS"
 cp "$DISPATCH" "$HOOKS/dispatch"
 cp "$HERE/../git-hooks/gitleaks.toml" "$HOOKS/gitleaks.toml"
 chmod 755 "$HOOKS/dispatch"
-for h in pre-commit pre-push commit-msg post-commit; do
+for h in pre-commit pre-merge-commit pre-applypatch pre-push commit-msg post-commit; do
     ln -sf dispatch "$HOOKS/$h"
 done
 
@@ -77,6 +83,13 @@ bad() { FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        rc=$RC"; echo "      
 pass_if()  { if [ "$RC" -eq 0 ]; then ok "$1"; else bad "$1"; fi; }   # expect success
 fail_if()  { if [ "$RC" -ne 0 ]; then ok "$1"; else bad "$1"; fi; }   # expect refusal
 
+# Commit with all hooks off — fixture setup that must neither exercise nor pay
+# for the gate under test.
+ungated_commit() {  # $1 = repo dir; rest = git commit args
+    local d="$1"; shift
+    git -C "$d" -c core.hooksPath=/dev/null commit "$@"
+}
+
 # A fresh repo with the shared hooks wired in. Commit identity and hooksPath go
 # in local config so the harness never depends on the caller's git setup.
 new_repo() {  # $1 = name; echoes the path
@@ -89,7 +102,7 @@ new_repo() {  # $1 = name; echoes the path
     git -C "$d" config core.hooksPath "$HOOKS"
     printf 'hello\n' > "$d/README.md"
     git -C "$d" add README.md
-    git -C "$d" -c core.hooksPath=/dev/null commit -qm init
+    ungated_commit "$d" -qm init
     printf '%s' "$d"
 }
 
@@ -155,6 +168,61 @@ git -C "$R" add settings.py
 run git -C "$R" commit -qm "db url"
 fail_if "DB URL with a real inline password blocks the commit"
 
+echo "== merge and am commit paths"
+
+# `git merge` (clean, auto-created merge commit) and `git am` create commit
+# objects without ever running pre-commit. Both get the same staged scan via
+# pre-merge-commit / pre-applypatch — at hook time the incoming content is
+# already in the index.
+R="$(new_repo mergeleak)"
+git -C "$R" checkout -q -b feature
+printf 'aws_key = "%s"\n' "$SECRET" > "$R/leak.py"
+git -C "$R" add leak.py
+ungated_commit "$R" -qm "leak on feature"
+git -C "$R" checkout -q main
+printf 'other\n' > "$R/other.py"
+git -C "$R" add other.py
+ungated_commit "$R" -qm "diverge main"
+run git -C "$R" merge --no-edit -q feature
+fail_if "secret arriving via clean git merge blocks the merge commit"
+run git -C "$R" log --oneline
+case "$OUT" in *"leak on feature"*) bad "blocked merge left no merge commit";; *) ok "blocked merge left no merge commit";; esac
+
+R="$(new_repo mergeclean)"
+git -C "$R" checkout -q -b feature
+printf 'feature code\n' > "$R/f.py"
+git -C "$R" add f.py
+ungated_commit "$R" -qm "clean feature"
+git -C "$R" checkout -q main
+printf 'main code\n' > "$R/m.py"
+git -C "$R" add m.py
+ungated_commit "$R" -qm "clean main"
+run git -C "$R" merge --no-edit -q feature
+pass_if "clean merge commit passes the gate"
+
+# `git am`: format a patch carrying a secret in one repo, apply in another.
+DONOR="$(new_repo amdonor)"
+printf 'aws_key = "%s"\n' "$SECRET" > "$DONOR/leak.py"
+git -C "$DONOR" add leak.py
+ungated_commit "$DONOR" -qm "patch with secret"
+PATCHES="$TMP/patches"
+git -C "$DONOR" format-patch -q -1 -o "$PATCHES" HEAD
+
+R="$(new_repo amtarget)"
+run git -C "$R" am "$PATCHES"/*.patch
+fail_if "secret arriving via git am blocks the commit"
+run git -C "$R" log --oneline
+case "$OUT" in *"patch with secret"*) bad "blocked git am left no commit object";; *) ok "blocked git am left no commit object";; esac
+git -C "$R" am --abort >/dev/null 2>&1
+
+printf 'clean addition\n' > "$DONOR/clean.py"
+git -C "$DONOR" add clean.py
+ungated_commit "$DONOR" -qm "clean patch"
+PATCHES2="$TMP/patches2"
+git -C "$DONOR" format-patch -q -1 -o "$PATCHES2" HEAD
+run git -C "$R" am "$PATCHES2"/*.patch
+pass_if "clean git am passes the gate"
+
 echo "== chaining to repo-local hooks"
 
 # hooksPath replaces .git/hooks; the dispatcher must delegate. A repo-local
@@ -188,6 +256,42 @@ if [ "$RC" -eq 0 ] && [[ "$OUT" == *REPO-LOCAL-PRECOMMIT-RAN* ]]; then
 else
     bad "dispatcher chains once, no self-recursion"
 fi
+
+echo "== linked worktrees"
+
+# The regression this pins: in a linked worktree `git rev-parse --git-dir`
+# returns .git/worktrees/<name>, which has no hooks/ — a dispatcher resolving
+# the repo's own hooks there silently dropped every repo-local hook for
+# commits made from a worktree. The hooks directory must come from
+# `--git-common-dir` (the resolver check-hookspath already uses).
+R="$(new_repo wt-main)"
+cat > "$R/.git/hooks/pre-commit" <<'EOF'
+#!/bin/sh
+echo "REPO-LOCAL-PRECOMMIT-RAN"
+exit 1
+EOF
+chmod +x "$R/.git/hooks/pre-commit"
+WT="$TMP/wt-linked"
+git -C "$R" worktree add -q "$WT" -b wt-branch 2>/dev/null
+printf 'clean\n' > "$WT/wt.py"
+git -C "$WT" add wt.py
+run git -C "$WT" commit -qm "from worktree"
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *REPO-LOCAL-PRECOMMIT-RAN* ]]; then
+    ok "repo-local pre-commit (in the common dir) vetoes a worktree commit"
+else
+    bad "repo-local pre-commit (in the common dir) vetoes a worktree commit"
+fi
+
+# And the secret scan itself must run from a worktree. The old code path
+# (`--git-dir ... || exit 0`) was also the dispatcher's one fail-open exit;
+# scanning must not depend on the repo-hook lookup succeeding.
+R="$(new_repo wt-scan)"
+WT2="$TMP/wt-scan-linked"
+git -C "$R" worktree add -q "$WT2" -b wt-scan-branch 2>/dev/null
+printf 'aws_key = "%s"\n' "$SECRET" > "$WT2/conf.py"
+git -C "$WT2" add conf.py
+run git -C "$WT2" commit -qm "leak from worktree"
+fail_if "staged secret blocks the commit from a linked worktree"
 
 echo "== pre-push"
 
@@ -297,7 +401,7 @@ git -C "$SEED" config user.name  "Hook Test"
 git -C "$SEED" config commit.gpgsign false
 printf 'hello\n' > "$SEED/README.md"
 git -C "$SEED" add README.md
-git -C "$SEED" -c core.hooksPath=/dev/null commit -qm init
+ungated_commit "$SEED" -qm init
 git -C "$SEED" -c core.hooksPath=/dev/null push -q origin main
 
 # …take a second clone, which will go stale…
@@ -310,7 +414,7 @@ git -C "$STALE" config core.hooksPath "$HOOKS"
 # …advance the remote from the seed clone (a commit the stale clone never
 # fetches)…
 printf 'more\n' >> "$SEED/README.md"
-git -C "$SEED" -c core.hooksPath=/dev/null commit -qam advance
+ungated_commit "$SEED" -qam advance
 git -C "$SEED" -c core.hooksPath=/dev/null push -q origin main
 
 # …then commit a secret in the stale clone and force-push. remote_sha is
@@ -374,6 +478,29 @@ if [ "$RC" -eq 0 ] && [[ "$OUT" == *"$DEEP"* ]]; then
     ok "deeply nested repos are still scanned for hooksPath drift"
 else
     bad "deeply nested repos are still scanned for hooksPath drift"
+fi
+
+# The -maxdepth 7 bound is a deliberate cost ceiling, but a scan it cut short
+# must say so — otherwise a clean report is indistinguishable from a complete
+# one. Territory at depth 8 (here: h) is what the walk cannot see.
+BOUNDED="$TMP/bounded"
+mkdir -p "$BOUNDED/a/b/c/d/e/f/g/h"
+OUT="$("$CHECK" "$BOUNDED" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *depth-bounded* ]]; then
+    ok "a walk cut short by the depth bound announces itself"
+else
+    bad "a walk cut short by the depth bound announces itself"
+fi
+
+# ...and a workspace the bound fully covers must stay silent, or the note is
+# ambient noise at every container start.
+SHALLOW="$TMP/shallow-full"
+mkdir -p "$SHALLOW/a/b/c/d/e/f/g"
+OUT="$("$CHECK" "$SHALLOW" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
+    ok "a fully covered tree stays silent about the depth bound"
+else
+    bad "a fully covered tree stays silent about the depth bound"
 fi
 
 echo "== uncovered repo-local hooks (check-hookspath)"

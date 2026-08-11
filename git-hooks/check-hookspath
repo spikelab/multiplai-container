@@ -21,7 +21,8 @@
 #
 # Usage: check-hookspath [ROOT]     (default ROOT: $WORKSPACE)
 #
-# Always exits 0. Output goes to stderr, only when something is found.
+# Always exits 0. Output goes to stderr, only when something is found — a
+# finding, or a one-line note when the depth bound cut the walk short.
 #
 # Scope: working checkouts only (`.git` directories and worktree/submodule
 # `.git` files). Bare repos (`*.git`) are not scanned — nothing commits from
@@ -72,6 +73,9 @@ while IFS= read -r gitpath; do
     #    honours core.hooksPath and would hand back the dispatcher's own
     #    directory. --git-common-dir also points every linked worktree at the
     #    single shared hooks directory, which is the one git actually uses.
+    #    Same resolver as the dispatcher's own_hook lookup — keep the two in
+    #    lockstep, or this check reports coverage the dispatcher does not
+    #    deliver.
     [ -n "$covered" ] || continue
     common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
     [ -n "$common" ] || continue
@@ -114,6 +118,30 @@ if [ "${#orphan_hits[@]}" -gt 0 ]; then
     printf '%s\n' \
         "  Fix by adding the name to the symlink loop in the container's" \
         "  Dockerfile, then cutting a release." >&2
+fi
+
+# The -maxdepth 7 above is a deliberate cost ceiling, but a scan it cut short
+# must say so — a clean report that is silently incomplete is exactly the kind
+# of quiet gap this script exists to remove. "Cut short" means unseen
+# territory exists: some directory (or worktree/submodule `.git` file) at
+# depth 8 that the main walk never reached. The probe mirrors the main find's
+# pruning one level deeper; `.git` is printed-then-pruned so a repo just past
+# the bound counts as unseen without the probe ever descending into any
+# `.git` (whose objects/ fan-out is what the ceiling protects against).
+# NOTE: `-mindepth` is unusable here — GNU find treats it as a global option
+# that would suppress -prune at shallow depths — hence the awk depth filter.
+probe_root="${root%/}"
+if [ -n "$probe_root" ]; then
+    base_fields=$(printf '%s' "$probe_root" | awk -F/ '{ print NF }')
+    truncated=$(find "$probe_root" -maxdepth 8 \
+                \( -name node_modules -o -name .venv -o -name venv \) -prune \
+                -o -name .git -print -prune \
+                -o -type d -print 2>/dev/null \
+            | awk -F/ -v b="$base_fields" 'NF >= b + 8 { print "y"; exit }')
+    if [ -n "$truncated" ]; then
+        printf '%s\n' \
+            "secret-scan: note — hookspath scan is depth-bounded (-maxdepth 7); entries deeper than 7 levels under $root were not checked." >&2
+    fi
 fi
 
 exit 0
