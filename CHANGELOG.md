@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.9.6] – 2026-08-11
+
 ### Added
 
 - **git-hooks: `git merge` and `git am` commit paths are now secret-scanned.**
@@ -67,6 +69,8 @@ sandboxed Claude Code container) and predates this changelog.
   main walk's pruning one level deeper — it still never descends into a
   `.git`. A fully covered tree stays silent, so the note is never ambient
   noise at container start.
+
+[0.9.6]: https://github.com/spikelab/multiplai-container/compare/v0.9.5...v0.9.6
 
 ## [0.9.5] – 2026-08-08
 
