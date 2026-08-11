@@ -57,11 +57,30 @@ hook_dir="${0%/*}"
 # does not detect in any form. See gitleaks.toml for the tested evidence.
 config="$hook_dir/gitleaks.toml"
 
-# The repo's own hooks live at "$(git rev-parse --git-dir)/hooks". Do NOT use
-# `git rev-parse --git-path hooks` here: that resolves core.hooksPath, which
-# points back at THIS directory, and the dispatcher would exec itself forever.
-git_dir="$(git rev-parse --git-dir 2>/dev/null)" || exit 0
-own_hook="$git_dir/hooks/$hook_name"
+# The repo's own hooks live at "<common git dir>/hooks". Two wrong resolvers,
+# both load-bearing to avoid:
+#
+#   * NOT `git rev-parse --git-path hooks`: that resolves core.hooksPath,
+#     which points back at THIS directory, and the dispatcher would exec
+#     itself forever.
+#   * NOT `--git-dir`: in a linked worktree it returns .git/worktrees/<name>,
+#     which has no hooks/ — git resolves hooks through the COMMON dir, so
+#     chaining from --git-dir silently disabled every repo-local hook exactly
+#     where most work happens (worktrees are the default working mode here).
+#
+# This is the same resolver check-hookspath uses for its covered-set check —
+# keep the two in lockstep, or the check reports coverage the dispatcher does
+# not deliver.
+#
+# A failed rev-parse must NOT skip the scan: it only means there is no repo
+# hook to chain to, never a reason to fail open on scanning. Leave own_hook
+# empty and carry on.
+if common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" \
+        && [ -n "$common_dir" ]; then
+    own_hook="$common_dir/hooks/$hook_name"
+else
+    own_hook=""
+fi
 
 # Fail closed. core.hooksPath is only set inside the container image, which
 # ships the gitleaks binary in the same layer, so a missing binary means a

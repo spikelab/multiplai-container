@@ -16,6 +16,23 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Fixed
+
+- **git-hooks: repo-local hooks now run from linked worktrees, and a failed
+  repo lookup no longer skips the secret scan.** The dispatcher resolved the
+  repo's own hooks via `git rev-parse --git-dir`, which in a linked worktree
+  returns `.git/worktrees/<name>` — a directory with no `hooks/`; git itself
+  resolves hooks through the common dir. So a repo-local vetoing `pre-commit`
+  or `pre-push` silently never ran for commits made from a worktree — the
+  default working mode for agent sessions. The dispatcher now resolves via
+  `git rev-parse --path-format=absolute --git-common-dir`, the same call
+  `check-hookspath` already used (the two are now cross-referenced so they
+  cannot diverge again). The same line's `|| exit 0` was also the
+  dispatcher's one fail-open path: any `rev-parse` failure skipped the
+  gitleaks scan entirely. A failed lookup now only empties the chain target;
+  the scan runs regardless. `tests/git-hooks-test.sh` grows a linked-worktree
+  fixture pinning both halves.
+
 ## [0.9.5] – 2026-08-08
 
 ### Fixed

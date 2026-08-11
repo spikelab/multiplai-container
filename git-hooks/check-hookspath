@@ -72,6 +72,9 @@ while IFS= read -r gitpath; do
     #    honours core.hooksPath and would hand back the dispatcher's own
     #    directory. --git-common-dir also points every linked worktree at the
     #    single shared hooks directory, which is the one git actually uses.
+    #    Same resolver as the dispatcher's own_hook lookup — keep the two in
+    #    lockstep, or this check reports coverage the dispatcher does not
+    #    deliver.
     [ -n "$covered" ] || continue
     common="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || continue
     [ -n "$common" ] || continue

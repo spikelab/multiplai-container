@@ -15,6 +15,10 @@
 #   * repo-local hooks still run, and pre-push still receives its stdin ref
 #     lines — hooksPath replaces .git/hooks, so this delegation is the only
 #     thing keeping existing per-repo hooks alive
+#   * repo-local hooks still run from a LINKED WORKTREE, and the scan runs
+#     there too — the hooks dir must resolve via --git-common-dir, because a
+#     worktree's own git dir has no hooks/ (and a failed lookup must not
+#     skip the scan)
 #   * the dispatcher does not exec itself (hooksPath must not be resolved via
 #     `git rev-parse --git-path hooks`)
 #   * a missing gitleaks binary fails CLOSED
@@ -77,6 +81,13 @@ bad() { FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        rc=$RC"; echo "      
 pass_if()  { if [ "$RC" -eq 0 ]; then ok "$1"; else bad "$1"; fi; }   # expect success
 fail_if()  { if [ "$RC" -ne 0 ]; then ok "$1"; else bad "$1"; fi; }   # expect refusal
 
+# Commit with all hooks off — fixture setup that must neither exercise nor pay
+# for the gate under test.
+ungated_commit() {  # $1 = repo dir; rest = git commit args
+    local d="$1"; shift
+    git -C "$d" -c core.hooksPath=/dev/null commit "$@"
+}
+
 # A fresh repo with the shared hooks wired in. Commit identity and hooksPath go
 # in local config so the harness never depends on the caller's git setup.
 new_repo() {  # $1 = name; echoes the path
@@ -89,7 +100,7 @@ new_repo() {  # $1 = name; echoes the path
     git -C "$d" config core.hooksPath "$HOOKS"
     printf 'hello\n' > "$d/README.md"
     git -C "$d" add README.md
-    git -C "$d" -c core.hooksPath=/dev/null commit -qm init
+    ungated_commit "$d" -qm init
     printf '%s' "$d"
 }
 
@@ -188,6 +199,42 @@ if [ "$RC" -eq 0 ] && [[ "$OUT" == *REPO-LOCAL-PRECOMMIT-RAN* ]]; then
 else
     bad "dispatcher chains once, no self-recursion"
 fi
+
+echo "== linked worktrees"
+
+# The regression this pins: in a linked worktree `git rev-parse --git-dir`
+# returns .git/worktrees/<name>, which has no hooks/ — a dispatcher resolving
+# the repo's own hooks there silently dropped every repo-local hook for
+# commits made from a worktree. The hooks directory must come from
+# `--git-common-dir` (the resolver check-hookspath already uses).
+R="$(new_repo wt-main)"
+cat > "$R/.git/hooks/pre-commit" <<'EOF'
+#!/bin/sh
+echo "REPO-LOCAL-PRECOMMIT-RAN"
+exit 1
+EOF
+chmod +x "$R/.git/hooks/pre-commit"
+WT="$TMP/wt-linked"
+git -C "$R" worktree add -q "$WT" -b wt-branch 2>/dev/null
+printf 'clean\n' > "$WT/wt.py"
+git -C "$WT" add wt.py
+run git -C "$WT" commit -qm "from worktree"
+if [ "$RC" -ne 0 ] && [[ "$OUT" == *REPO-LOCAL-PRECOMMIT-RAN* ]]; then
+    ok "repo-local pre-commit (in the common dir) vetoes a worktree commit"
+else
+    bad "repo-local pre-commit (in the common dir) vetoes a worktree commit"
+fi
+
+# And the secret scan itself must run from a worktree. The old code path
+# (`--git-dir ... || exit 0`) was also the dispatcher's one fail-open exit;
+# scanning must not depend on the repo-hook lookup succeeding.
+R="$(new_repo wt-scan)"
+WT2="$TMP/wt-scan-linked"
+git -C "$R" worktree add -q "$WT2" -b wt-scan-branch 2>/dev/null
+printf 'aws_key = "%s"\n' "$SECRET" > "$WT2/conf.py"
+git -C "$WT2" add conf.py
+run git -C "$WT2" commit -qm "leak from worktree"
+fail_if "staged secret blocks the commit from a linked worktree"
 
 echo "== pre-push"
 
@@ -297,7 +344,7 @@ git -C "$SEED" config user.name  "Hook Test"
 git -C "$SEED" config commit.gpgsign false
 printf 'hello\n' > "$SEED/README.md"
 git -C "$SEED" add README.md
-git -C "$SEED" -c core.hooksPath=/dev/null commit -qm init
+ungated_commit "$SEED" -qm init
 git -C "$SEED" -c core.hooksPath=/dev/null push -q origin main
 
 # …take a second clone, which will go stale…
@@ -310,7 +357,7 @@ git -C "$STALE" config core.hooksPath "$HOOKS"
 # …advance the remote from the seed clone (a commit the stale clone never
 # fetches)…
 printf 'more\n' >> "$SEED/README.md"
-git -C "$SEED" -c core.hooksPath=/dev/null commit -qam advance
+ungated_commit "$SEED" -qam advance
 git -C "$SEED" -c core.hooksPath=/dev/null push -q origin main
 
 # …then commit a secret in the stale clone and force-push. remote_sha is
