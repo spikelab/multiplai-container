@@ -480,6 +480,29 @@ else
     bad "deeply nested repos are still scanned for hooksPath drift"
 fi
 
+# The -maxdepth 7 bound is a deliberate cost ceiling, but a scan it cut short
+# must say so — otherwise a clean report is indistinguishable from a complete
+# one. Territory at depth 8 (here: h) is what the walk cannot see.
+BOUNDED="$TMP/bounded"
+mkdir -p "$BOUNDED/a/b/c/d/e/f/g/h"
+OUT="$("$CHECK" "$BOUNDED" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *depth-bounded* ]]; then
+    ok "a walk cut short by the depth bound announces itself"
+else
+    bad "a walk cut short by the depth bound announces itself"
+fi
+
+# ...and a workspace the bound fully covers must stay silent, or the note is
+# ambient noise at every container start.
+SHALLOW="$TMP/shallow-full"
+mkdir -p "$SHALLOW/a/b/c/d/e/f/g"
+OUT="$("$CHECK" "$SHALLOW" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [ -z "$OUT" ]; then
+    ok "a fully covered tree stays silent about the depth bound"
+else
+    bad "a fully covered tree stays silent about the depth bound"
+fi
+
 echo "== uncovered repo-local hooks (check-hookspath)"
 
 # hooksPath REPLACES .git/hooks, so a repo-local hook whose name the dispatcher

@@ -44,6 +44,14 @@ sandboxed Claude Code container) and predates this changelog.
   gitleaks scan entirely. A failed lookup now only empties the chain target;
   the scan runs regardless. `tests/git-hooks-test.sh` grows a linked-worktree
   fixture pinning both halves.
+- **`check-hookspath` announces when its depth bound truncates the scan.**
+  The `-maxdepth 7` cost ceiling silently hid any repo nested deeper — a
+  clean report was indistinguishable from a complete one. The scan now emits
+  a one-line stderr note when unseen territory exists past the bound (any
+  directory or `.git` file at depth 8), detected by a probe that mirrors the
+  main walk's pruning one level deeper — it still never descends into a
+  `.git`. A fully covered tree stays silent, so the note is never ambient
+  noise at container start.
 
 ## [0.9.5] – 2026-08-08
 
