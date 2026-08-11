@@ -7,6 +7,8 @@
 # the behaviour that matters:
 #
 #   * a secret in the staged diff blocks the commit
+#   * a secret arriving via a clean `git merge` or `git am` blocks that
+#     commit too (pre-merge-commit / pre-applypatch run the same staged scan)
 #   * a secret in the pushed range blocks the push (the --no-verify backstop,
 #     and the only gate private repos get)
 #   * the secret VALUE never reaches stdout/stderr (redaction) — a leak report
@@ -65,7 +67,7 @@ mkdir -p "$HOOKS"
 cp "$DISPATCH" "$HOOKS/dispatch"
 cp "$HERE/../git-hooks/gitleaks.toml" "$HOOKS/gitleaks.toml"
 chmod 755 "$HOOKS/dispatch"
-for h in pre-commit pre-push commit-msg post-commit; do
+for h in pre-commit pre-merge-commit pre-applypatch pre-push commit-msg post-commit; do
     ln -sf dispatch "$HOOKS/$h"
 done
 
@@ -165,6 +167,61 @@ printf 'DATABASE_URL = "postgresql://svc_user:Xk9mQ2vN7bL4pS8d@10.0.0.5:5432/pro
 git -C "$R" add settings.py
 run git -C "$R" commit -qm "db url"
 fail_if "DB URL with a real inline password blocks the commit"
+
+echo "== merge and am commit paths"
+
+# `git merge` (clean, auto-created merge commit) and `git am` create commit
+# objects without ever running pre-commit. Both get the same staged scan via
+# pre-merge-commit / pre-applypatch — at hook time the incoming content is
+# already in the index.
+R="$(new_repo mergeleak)"
+git -C "$R" checkout -q -b feature
+printf 'aws_key = "%s"\n' "$SECRET" > "$R/leak.py"
+git -C "$R" add leak.py
+ungated_commit "$R" -qm "leak on feature"
+git -C "$R" checkout -q main
+printf 'other\n' > "$R/other.py"
+git -C "$R" add other.py
+ungated_commit "$R" -qm "diverge main"
+run git -C "$R" merge --no-edit -q feature
+fail_if "secret arriving via clean git merge blocks the merge commit"
+run git -C "$R" log --oneline
+case "$OUT" in *"leak on feature"*) bad "blocked merge left no merge commit";; *) ok "blocked merge left no merge commit";; esac
+
+R="$(new_repo mergeclean)"
+git -C "$R" checkout -q -b feature
+printf 'feature code\n' > "$R/f.py"
+git -C "$R" add f.py
+ungated_commit "$R" -qm "clean feature"
+git -C "$R" checkout -q main
+printf 'main code\n' > "$R/m.py"
+git -C "$R" add m.py
+ungated_commit "$R" -qm "clean main"
+run git -C "$R" merge --no-edit -q feature
+pass_if "clean merge commit passes the gate"
+
+# `git am`: format a patch carrying a secret in one repo, apply in another.
+DONOR="$(new_repo amdonor)"
+printf 'aws_key = "%s"\n' "$SECRET" > "$DONOR/leak.py"
+git -C "$DONOR" add leak.py
+ungated_commit "$DONOR" -qm "patch with secret"
+PATCHES="$TMP/patches"
+git -C "$DONOR" format-patch -q -1 -o "$PATCHES" HEAD
+
+R="$(new_repo amtarget)"
+run git -C "$R" am "$PATCHES"/*.patch
+fail_if "secret arriving via git am blocks the commit"
+run git -C "$R" log --oneline
+case "$OUT" in *"patch with secret"*) bad "blocked git am left no commit object";; *) ok "blocked git am left no commit object";; esac
+git -C "$R" am --abort >/dev/null 2>&1
+
+printf 'clean addition\n' > "$DONOR/clean.py"
+git -C "$DONOR" add clean.py
+ungated_commit "$DONOR" -qm "clean patch"
+PATCHES2="$TMP/patches2"
+git -C "$DONOR" format-patch -q -1 -o "$PATCHES2" HEAD
+run git -C "$R" am "$PATCHES2"/*.patch
+pass_if "clean git am passes the gate"
 
 echo "== chaining to repo-local hooks"
 

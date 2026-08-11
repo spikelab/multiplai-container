@@ -16,6 +16,18 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **git-hooks: `git merge` and `git am` commit paths are now secret-scanned.**
+  A clean merge's auto-created commit and each commit `git am` creates used to
+  exec straight through the dispatcher unscanned — only pre-push caught the
+  result. `pre-merge-commit` and `pre-applypatch` now run the same staged
+  scan as `pre-commit` (at hook time the incoming content is already in the
+  index, so index-vs-HEAD is exactly the new commit). Commit paths git offers
+  no pre-commit-class hook for (`cherry-pick`, `revert`, merge-backend
+  `rebase`) are documented as a known limit in the dispatch header, with
+  pre-push as their backstop.
+
 ### Fixed
 
 - **git-hooks: repo-local hooks now run from linked worktrees, and a failed

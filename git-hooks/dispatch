@@ -10,9 +10,17 @@
 #
 # Two responsibilities, in this order:
 #
-#   1. Scan for secrets (gitleaks), on the two hooks where it can still help:
+#   1. Scan for secrets (gitleaks), on the hooks where a scan can still stop
+#      a commit object from being created or leaving the machine:
 #        pre-commit — scans the staged diff. Blocks BEFORE a commit object
 #                     exists, so there is nothing to rewrite afterwards.
+#        pre-merge-commit — the same staged scan, for the commit a clean
+#                     `git merge` auto-creates; the merged result is already
+#                     in the index when this hook runs. (A conflicted merge
+#                     is concluded by `git commit`, which pre-commit covers.)
+#        pre-applypatch — the same staged scan, for each commit `git am` is
+#                     about to create; the patch is already applied to the
+#                     index when this hook runs.
 #        pre-push   — scans the commit range actually being pushed. This is the
 #                     backstop for commits made with --no-verify, or made
 #                     outside the container where this hook never ran. It is
@@ -28,14 +36,20 @@
 #      knowhere's own credential-guard pre-commit. Silently weakening one
 #      control while installing another is worse than installing nothing.
 #
-# Hooks other than pre-commit/pre-push exist here purely to preserve #2. They
-# exec straight through, untouched.
+# Hooks other than the four scanning ones exist here purely to preserve #2.
+# They exec straight through, untouched.
 #
 # Escape hatch: `git commit --no-verify` / `git push --no-verify`, and nothing
 # else that this dispatcher provides. There is deliberately no MULTIPLAI_SKIP=1
 # env var — an env-var bypass is a channel an agent can take on its own,
 # quietly, mid-task. --no-verify is a deliberate act typed by a human, and
 # pre-push still catches what a skipped pre-commit let through.
+#
+# Known limit: some commands create commit objects with no pre-commit-class
+# hook to veto them — `git cherry-pick`, `git revert`, and the default
+# (merge-backend) `git rebase` run only message hooks. Git offers no scan
+# point before those objects exist; pre-push is the backstop that still scans
+# them on the way out.
 #
 # Known limit: the gate rides on the SYSTEM-level core.hooksPath, and git's
 # config precedence (system < global < local) means a repo-local
@@ -134,10 +148,10 @@ leak_banner() {
         "============================================================" >&2
 }
 
-scan_staged() {
+scan_staged() {  # $1 = banner label (default "commit")
     require_gitleaks
     if ! gitleaks git --staged "${GITLEAKS_COMMON[@]}"; then
-        leak_banner "commit"
+        leak_banner "${1:-commit}"
         exit 1
     fi
 }
@@ -234,6 +248,14 @@ scan_push_range() {
 case "$hook_name" in
     pre-commit)
         scan_staged
+        ;;
+    # Both of these see the about-to-be-committed content already staged, so
+    # the pre-commit scan is exactly right: index vs HEAD is the new commit.
+    pre-merge-commit)
+        scan_staged "merge commit"
+        ;;
+    pre-applypatch)
+        scan_staged "git am"
         ;;
     pre-push)
         # Consume stdin to scan, then replay it verbatim to the repo's own hook
