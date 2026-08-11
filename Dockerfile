@@ -183,6 +183,10 @@ RUN ARCH=$(dpkg --print-architecture) \
 # They fire on essentially every ref update and git housekeeping pass, and
 # paying a process spawn each time is not worth it — no repo in this workspace
 # uses them. Add the name here if one ever does.
+#
+# The trailing `test -L` lines assert the two scanning hooks survived the
+# loop: a typo there would otherwise ship an image whose secret gate simply
+# never fires, with nothing failing anywhere.
 COPY git-hooks/dispatch git-hooks/check-hookspath git-hooks/gitleaks.toml /usr/local/share/git-hooks/
 RUN chmod 755 /usr/local/share/git-hooks/dispatch /usr/local/share/git-hooks/check-hookspath \
     && chmod 644 /usr/local/share/git-hooks/gitleaks.toml \
@@ -194,6 +198,8 @@ RUN chmod 755 /usr/local/share/git-hooks/dispatch /usr/local/share/git-hooks/che
                 push-to-checkout fsmonitor-watchman; do \
            ln -sf dispatch "/usr/local/share/git-hooks/$h"; \
        done \
+    && test -L /usr/local/share/git-hooks/pre-commit \
+    && test -L /usr/local/share/git-hooks/pre-push \
     && git config --system core.hooksPath /usr/local/share/git-hooks \
     && test "$(git config --system --get core.hooksPath)" = /usr/local/share/git-hooks
 

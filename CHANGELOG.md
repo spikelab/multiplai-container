@@ -27,6 +27,10 @@ sandboxed Claude Code container) and predates this changelog.
   no pre-commit-class hook for (`cherry-pick`, `revert`, merge-backend
   `rebase`) are documented as a known limit in the dispatch header, with
   pre-push as their backstop.
+- **Dockerfile: build-time assertion that the `pre-commit` and `pre-push`
+  dispatcher symlinks exist.** A typo in the symlink loop would previously
+  ship an image whose secret gate never fires, with nothing failing
+  anywhere; `test -L` on both scanning hooks now fails the build instead.
 
 ### Changed
 
