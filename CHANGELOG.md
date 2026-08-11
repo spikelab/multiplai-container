@@ -28,6 +28,17 @@ sandboxed Claude Code container) and predates this changelog.
   `rebase`) are documented as a known limit in the dispatch header, with
   pre-push as their backstop.
 
+### Changed
+
+- **The entrypoint's hookspath drift scan runs only for `claude` sessions.**
+  `venv-sync-entrypoint.sh` ran `check-hookspath` on every start of the
+  image — including the launcher's post-exit drain container, whose stdio is
+  discarded (`docker run -d … >/dev/null 2>&1`), and hub driver containers.
+  The scan is a warning for a human; a walk of the workspace nobody can see
+  is pure cost. It is now gated on the entrypoint's first argument being
+  `claude` (what the launcher passes for interactive sessions, and the
+  image's default CMD).
+
 ### Fixed
 
 - **git-hooks: repo-local hooks now run from linked worktrees, and a failed
