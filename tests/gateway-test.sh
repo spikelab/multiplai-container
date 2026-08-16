@@ -22,7 +22,7 @@ STUB="$TMP/bin"; FAKE_HOME="$TMP/home"
 mkdir -p "$STUB" "$FAKE_HOME"
 
 # Stubs: print a marker, their argv (one per line, bracketed), and cwd.
-for c in swift xcodebuild xcrun qmd curl pkill; do
+for c in swift xcodebuild xcrun qmd curl pkill agent-browser; do
   cat > "$STUB/$c" <<EOF
 #!/usr/bin/env bash
 echo "STUB:$c cwd=\$PWD"
@@ -202,6 +202,38 @@ expect_deny "docker command substitution" \
   'multiplai-docker up $(whoami)'                        "metacharacter"
 expect_deny "docker via xcsift pipe" \
   'multiplai-docker up dolce 2>&1 | xcsift --format toon --quiet' "xcsift pipe only allowed"
+
+echo "# host browser is opt-in — the flag is a host file the container cannot write"
+HOST_BROWSER_FLAG="$FAKE_HOME/.local/state/multiplai/host-browser-enabled"
+
+expect_deny "ab denied with no flag" \
+  'agent-browser snapshot'                          "host browser is not enabled"
+expect_deny "ab open denied with no flag" \
+  'agent-browser open https://example.com'          "host browser is not enabled"
+# A deny that does not say how to undo itself is a dead end for the host owner.
+expect_deny "the deny names the flag path" \
+  'agent-browser snapshot'                          ".local/state/multiplai/host-browser-enabled"
+# The gate must come first: a file: URL with the browser off is refused as
+# "not enabled", never as a scheme problem, or the message teaches the wrong fix.
+expect_deny "gate precedes the file: check" \
+  'agent-browser open file:///etc/passwd'           "host browser is not enabled"
+
+mkdir -p "$(dirname "$HOST_BROWSER_FLAG")"
+touch "$HOST_BROWSER_FLAG"
+
+expect_allow "ab allowed once the flag exists"      'agent-browser snapshot'              "STUB:agent-browser"
+expect_allow "ab open allowed once enabled"         'agent-browser open https://example.com' "STUB:agent-browser"
+# The pre-existing file:-scheme block must survive the new gate in front of it.
+expect_deny "file: still blocked when enabled" \
+  'agent-browser open file:///etc/passwd'           "file: URL not allowed"
+expect_deny "file: blocked on goto too" \
+  'agent-browser goto file:///Users/x/.ssh/id_ed25519' "file: URL not allowed"
+# Non-navigation verbs never carried the file: block and must not start now.
+expect_allow "non-navigation verb is untouched"     'agent-browser type hello'            "STUB:agent-browser"
+
+rm -f "$HOST_BROWSER_FLAG"
+expect_deny "removing the flag closes it again" \
+  'agent-browser snapshot'                          "host browser is not enabled"
 
 echo
 echo "gateway-test: $PASS passed, $FAIL failed"
