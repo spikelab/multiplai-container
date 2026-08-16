@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.10] – 2026-08-16
+
 ### Changed
 
 - **The host browser is now opt-in, and this is the gate.** `agent-browser` /
@@ -49,6 +51,8 @@ sandboxed Claude Code container) and predates this changelog.
   `tests/gateway-test.sh` covers it: 83 passed, and the nine new cases include
   the first coverage the `file:` block has ever had. Five of them fail against
   the pre-change gateway.
+
+[0.10]: https://github.com/spikelab/multiplai-container/compare/v0.9.6...v0.10
 
 ## [0.9.6] – 2026-08-11
 
