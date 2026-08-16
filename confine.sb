@@ -1,0 +1,111 @@
+;; confine.sb — the filesystem jail for the host SSH bridge (mktplace#15).
+;;
+;; Applied by container-build-gateway.sh as:
+;;   sandbox-exec -D WORKSPACE=<declared workspace> -f ~/.local/state/multiplai/confine.sb …
+;;
+;; The workspace arrives as a PARAMETER, not baked in, so one shipped file
+;; serves every install. It is read from ~/.local/state/multiplai/workspace,
+;; which only the host can write — a value from the container would be a
+;; boundary set by the side being confined.
+;;
+;; SHAPE OF THE POLICY
+;;
+;;   writes   deny by default, allow back under the workspace and the caches a
+;;            build genuinely needs. This is the control; everything else here
+;;            exists to keep it from breaking real work.
+;;   reads    open. The bridge's job is building and transcribing host-side:
+;;            SDKs, toolchains, model weights and config all live outside any
+;;            workspace, and enumerating them would be a second allowlist that
+;;            drifts. Read confinement is not what issue #15 reported.
+;;   network  open. mlx-whisper pulls models from Hugging Face on first use and
+;;            the browser bridge speaks CDP over loopback.
+;;   process  exec/fork allowed — a build spawns compilers, linkers, simulators.
+;;
+;; This file installs through the same `install_host_tool` loop as the gateway,
+;; so a gateway that references it and a profile that lacks a path can never be
+;; separate releases.
+
+(version 1)
+
+;; Deny by default and report what is denied. `(allow default)` would invert
+;; the whole point of the file.
+(deny default)
+(deny file-write* (with report))
+
+;; --- what a confined command may do that is not a file write ---------------
+
+(allow process-exec process-fork)
+(allow signal (target same-sandbox))
+(allow sysctl-read)
+(allow mach-lookup)
+(allow ipc-posix-shm)
+(allow network*)
+(allow file-read*)
+
+;; --- writes: the workspace ------------------------------------------------
+
+(allow file-write*
+  (subpath (param "WORKSPACE")))
+
+;; --- writes: temporary directories ----------------------------------------
+;;
+;; Every toolchain here writes temporaries. /var/folders is where macOS puts
+;; per-user TMPDIR, so omitting it breaks essentially everything.
+
+(allow file-write*
+  (subpath "/tmp")
+  (subpath "/private/tmp")
+  (subpath "/var/folders")
+  (subpath "/private/var/folders")
+  (subpath "/dev"))
+
+;; --- writes: caches that are not workspace state ---------------------------
+;;
+;; Each entry below is a tool that writes outside any workspace by design, and
+;; each is a real reported need rather than a precaution. They are listed one
+;; per tool so that removing a tool from the allowlist makes the corresponding
+;; write path obviously removable too.
+
+;; Xcode / SwiftPM: DerivedData, module caches, SwiftPM's own clone cache.
+;; `swift build` and `xcodebuild` both fail without these.
+(allow file-write*
+  (subpath (string-append (param "HOME") "/Library/Developer"))
+  (subpath (string-append (param "HOME") "/Library/Caches/org.swift.swiftpm"))
+  (subpath (string-append (param "HOME") "/Library/Caches/com.apple.dt.Xcode"))
+  (subpath (string-append (param "HOME") "/.swiftpm"))
+  (subpath (string-append (param "HOME") "/.cache/org.swift.swiftpm")))
+
+;; mlx-whisper: downloads model weights to the Hugging Face cache on first use.
+;; The issue calls this out explicitly as a thing that must keep working.
+(allow file-write*
+  (subpath (string-append (param "HOME") "/.cache/huggingface"))
+  (subpath (string-append (param "HOME") "/.cache/mlx"))
+  (subpath (string-append (param "HOME") "/.triton"))
+  (subpath (string-append (param "HOME") "/Library/Caches/huggingface")))
+
+;; qmd: maintains its search index outside the collections it indexes
+;; (`qmd embed` / `qmd update` are on the gateway allowlist).
+(allow file-write*
+  (subpath (string-append (param "HOME") "/.qmd"))
+  (subpath (string-append (param "HOME") "/Library/Application Support/qmd"))
+  (subpath (string-append (param "HOME") "/.cache/qmd")))
+
+;; A generic cache root, last and deliberately broad: several of the above are
+;; conventions rather than guarantees, and a tool that moves its cache one
+;; directory sideways should not take the bridge down mid-session.
+(allow file-write*
+  (subpath (string-append (param "HOME") "/.cache")))
+
+;; --- what stays denied, on purpose -----------------------------------------
+;;
+;; Not listed above, and that is the point:
+;;   $HOME itself                the reported escape — `--output-dir .` landing
+;;                               in ~ because the forced command started there
+;;   ~/.ssh ~/.aws ~/.config     credentials, readable but not writable
+;;   ~/Library/Application Support/Google/Chrome
+;;                               the browser profile. agent-browser is exempt
+;;                               from this profile entirely (see the gateway's
+;;                               agent-browser branch) precisely because
+;;                               confining it here would be a contradiction —
+;;                               but nothing ELSE gets to write it.
+;;   /usr /etc /System /Library  the system

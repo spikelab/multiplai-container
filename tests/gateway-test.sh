@@ -62,8 +62,20 @@ for a in "$@"; do echo "ARG:[$a]"; done
 EOF
 chmod +x "$FAKE_HOME/.local/bin/multiplai-docker.py"
 
+# The declared workspace. Path-taking commands are denied without it (fail
+# closed), so almost every test below needs one — the cases that assert the
+# denial remove it explicitly and put it back.
+#
+# The cd-prefix directories live INSIDE it, because a `cd` prefix that leaves
+# the workspace is now itself a denial. `$TMP/outside-ws` is deliberately not.
+WS_DIR="$TMP/ws"
+WS_DECL="$FAKE_HOME/.local/state/multiplai/workspace"
+mkdir -p "$WS_DIR" "$FAKE_HOME/.local/state/multiplai"
+echo "$WS_DIR" > "$WS_DECL"
+
 # Dirs exercising the cd prefix.
-mkdir -p "$TMP/gw test dir" "$TMP/gw (paren) dir" "$TMP/plain"
+mkdir -p "$WS_DIR/gw test dir" "$WS_DIR/gw (paren) dir" "$WS_DIR/plain"
+mkdir -p "$TMP/outside-ws"
 
 PASS=0; FAIL=0
 run_gw() {  # $1 = SSH_ORIGINAL_COMMAND; sets OUT, ERR, RC
@@ -92,10 +104,10 @@ expect_allow "curl loopback"               'curl http://localhost:8000/api'    "
 expect_allow "pkill simulator"             'pkill -f Simulator'                "STUB:pkill"
 
 echo "# cd prefix: escaped/quoted paths must reach cd unquoted"
-expect_allow "cd escaped space"   "cd $TMP/gw\\ test\\ dir && swift build"       "cwd=$TMP/gw test dir"
-expect_allow "cd escaped parens"  "cd $TMP/gw\\ \\(paren\\)\\ dir && swift build" "cwd=$TMP/gw (paren) dir"
-expect_allow "cd single-quoted"   "cd '$TMP/gw test dir' && swift build"          "cwd=$TMP/gw test dir"
-expect_allow "cd plain"           "cd $TMP/plain && swift build"                  "cwd=$TMP/plain"
+expect_allow "cd escaped space"   "cd $WS_DIR/gw\\ test\\ dir && swift build"       "cwd=$WS_DIR/gw test dir"
+expect_allow "cd escaped parens"  "cd $WS_DIR/gw\\ \\(paren\\)\\ dir && swift build" "cwd=$WS_DIR/gw (paren) dir"
+expect_allow "cd single-quoted"   "cd '$WS_DIR/gw test dir' && swift build"          "cwd=$WS_DIR/gw test dir"
+expect_allow "cd plain"           "cd $WS_DIR/plain && swift build"                  "cwd=$WS_DIR/plain"
 
 echo "# escaped metachars in argv are data, not shell"
 expect_allow "escaped paren scheme is one argv word" \
@@ -107,7 +119,7 @@ echo "# smuggling attempts stay denied"
 # here, the test would be checking that the gateway rejects the *result* of the
 # injection — after this harness had already run it.
 expect_deny "semicolon chain"           'swift build; rm -rf /tmp/x'          "metacharacter"
-expect_deny "&& chain after cd"         "cd $TMP/plain && rm -rf /tmp/x && swift build" "metacharacter"
+expect_deny "&& chain after cd"         "cd $WS_DIR/plain && rm -rf /tmp/x && swift build" "metacharacter"
 # shellcheck disable=SC2016  # literal payload, see above
 expect_deny "command substitution"      'swift build $(touch /tmp/pwned)'     "metacharacter"
 # shellcheck disable=SC2016  # literal payload, see above
@@ -118,7 +130,7 @@ expect_deny "unescaped paren"           'swift build (dev)'                   "m
 expect_deny "newline smuggle"           $'swift build\nrm -rf /tmp/x'         "metacharacter"
 expect_deny "escaped-backslash + live semicolon" 'swift build \\; rm -rf /tmp/x' "metacharacter"
 expect_deny "not allowlisted"           'rm -rf /tmp/x'                       "not in allowlist"
-expect_deny "cd unescaped space (two words)" "cd $TMP/gw test dir && swift build" "malformed cd prefix"
+expect_deny "cd unescaped space (two words)" "cd $WS_DIR/gw test dir && swift build" "malformed cd prefix"
 expect_deny "cd to metachar dir fails at cd" 'cd /tmp\ \&\&\ rm && swift build' "cd failed"
 expect_deny "interactive shell"         ''                                    "interactive"
 
@@ -234,6 +246,78 @@ expect_allow "non-navigation verb is untouched"     'agent-browser type hello'  
 rm -f "$HOST_BROWSER_FLAG"
 expect_deny "removing the flag closes it again" \
   'agent-browser snapshot'                          "host browser is not enabled"
+
+echo "# workspace jail: cwd is pinned, and a cd may not leave the workspace"
+# The reported escape: the forced command ran with cwd = the host user's HOME,
+# so `mlx_whisper --output-dir .` wrote into ~ on the Mac. With a declared
+# workspace and no explicit cd prefix, cwd must be the workspace.
+expect_allow "cwd is pinned to the declared workspace" \
+  'swift build'                                     "cwd=$WS_DIR"
+expect_allow "cd inside the workspace still works" \
+  "cd $WS_DIR/plain && swift build"                 "cwd=$WS_DIR/plain"
+expect_deny  "cd outside the workspace is denied" \
+  "cd $TMP/outside-ws && swift build"               "outside the declared workspace"
+expect_deny  "cd to the host home is denied" \
+  "cd $FAKE_HOME && swift build"                    "outside the declared workspace"
+expect_deny  "cd to / is denied" \
+  'cd / && swift build'                             "outside the declared workspace"
+# A string-prefix test would pass a sibling whose name merely starts with the
+# workspace path.
+mkdir -p "${WS_DIR}-evil"
+expect_deny  "sibling sharing the workspace prefix is denied" \
+  "cd ${WS_DIR}-evil && swift build"                "outside the declared workspace"
+# ...and a symlink out of the workspace must not launder the check.
+ln -sfn "$TMP/outside-ws" "$WS_DIR/escape-link"
+expect_deny  "symlink out of the workspace is denied" \
+  "cd $WS_DIR/escape-link && swift build"           "outside the declared workspace"
+
+echo "# workspace jail: a malformed declaration is not a declaration"
+echo "not/an/absolute/path" > "$WS_DECL"
+expect_deny "relative path in the declaration is refused" \
+  'swift build'                                     "not an existing absolute path"
+echo "/nonexistent/workspace/$$" > "$WS_DECL"
+expect_deny "declared path that does not exist is refused" \
+  'swift build'                                     "not an existing absolute path"
+echo "$WS_DIR" > "$WS_DECL"
+
+echo "# workspace jail: fail closed when nothing is declared"
+mv "$WS_DECL" "$WS_DECL.bak"
+# Path-taking commands stop.
+expect_deny "swift denied with no workspace declared" \
+  'swift build'                                     "no workspace declared"
+expect_deny "xcodebuild denied with no workspace declared" \
+  'xcodebuild -scheme App build'                    "no workspace declared"
+expect_deny "mlx-whisper denied with no workspace declared" \
+  'mlx-whisper --output-dir . audio.m4a'            "no workspace declared"
+expect_deny "qmd denied with no workspace declared" \
+  'qmd query hello'                                 "no workspace declared"
+expect_deny "xcrun denied with no workspace declared" \
+  'xcrun simctl list'                               "no workspace declared"
+# Commands that cannot express a path keep working — the upgrade must not take
+# the bridge diagnostic down with it.
+expect_allow "command -v survives with no workspace" \
+  'command -v swift'                                ""
+expect_allow "pkill survives with no workspace" \
+  'pkill -f Simulator'                              "STUB:pkill"
+expect_allow "curl survives with no workspace" \
+  'curl http://localhost:8000/api'                  "STUB:curl"
+expect_allow "gh-token survives with no workspace" \
+  'multiplai-gh-token --check myapp'                "STUB:multiplai-gh-token"
+expect_allow "multiplai-docker survives with no workspace" \
+  'multiplai-docker ps dolce'                       "STUB:multiplai-docker"
+mv "$WS_DECL.bak" "$WS_DECL"
+expect_allow "restoring the declaration reopens it" \
+  'swift build'                                     "STUB:swift"
+
+echo "# workspace jail: no sandbox-exec on this host degrades to cwd pinning"
+# sandbox-exec is macOS-only and pinned to /usr/bin by the gateway, so on Linux
+# the wrap is skipped. The command must still run, and still run confined to the
+# workspace by cwd — the layer that fixes the reported escape.
+if [ ! -x /usr/bin/sandbox-exec ]; then
+  expect_allow "runs without sandbox-exec present" 'swift build' "cwd=$WS_DIR"
+else
+  echo "  skip- sandbox-exec present; wrap is exercised on the host"
+fi
 
 echo
 echo "gateway-test: $PASS passed, $FAIL failed"

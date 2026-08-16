@@ -16,6 +16,59 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **The host bridge now confines path-taking commands to your workspace.** It
+  has always enforced a *command allowlist*; it enforced no *filesystem
+  boundary*, and those are different controls. The forced command ran with cwd
+  = your home directory and no branch inspected path arguments, so
+  `mlx_whisper --output-dir .` wrote into `~` on the Mac — outside the
+  workspace, invisible to the container. Any allowlisted command taking an
+  output path could be pointed anywhere you can write.
+
+  Three layers now apply, in order: cwd is pinned to the declared workspace
+  instead of `$HOME`; an explicit `cd` prefix is rejected when it resolves
+  outside the workspace (symlinks resolved, so a link out of the tree does not
+  launder it); and the command runs under `sandbox-exec` with the shipped
+  `confine.sb` profile, which denies writes by default and allows them back
+  under the workspace plus the caches builds genuinely need. Reads and network
+  stay open — SDKs, model weights and config all live outside any workspace,
+  and confining reads is not what was reported.
+
+### ⚠️ Breaking
+
+- **The bridge now needs a declared workspace, and refuses path-taking commands
+  without one.** The workspace cannot come from the container: a boundary
+  supplied by the side being confined is not a boundary. It is read from
+  `~/.local/state/multiplai/workspace` — one absolute path, host-owned, the
+  same trust model as the host-browser flag.
+
+  **Run `./setup.sh` from your multiplai-kit checkout after taking this tag.**
+  It writes the file, installs the profile, and you are done. Until it runs,
+  `swift`, `xcodebuild`, `xcrun`, `xcodegen`, `xcsift`, `mlx-whisper` and `qmd`
+  are denied with a message naming the fix. To declare it by hand instead:
+
+  ```
+  mkdir -p ~/.local/state/multiplai
+  echo /absolute/path/to/your/workspace > ~/.local/state/multiplai/workspace
+  ```
+
+  This is a deliberate, announced break rather than a warn-and-run default. A
+  control that is off until someone opts in is the state that produced the bug.
+
+  **Unaffected**, because they cannot express a path: `command -v`, `pkill`,
+  `open -a Simulator`, `multiplai-gh-token`, `multiplai-docker`, `curl`.
+
+  **`agent-browser` is deliberately outside the jail**, and that is a stated
+  gap rather than an oversight. It drives a browser whose profile and cookie
+  store live under `~/Library`; confining it to the workspace would either
+  break it or require exempting exactly the directories worth protecting. It
+  keeps the control that fits it — the explicit host opt-in added in 0.10.
+
+  If a tool misbehaves under the profile, moving
+  `~/.local/state/multiplai/confine.sb` aside drops only the `sandbox-exec`
+  layer; cwd pinning and `cd` containment still apply.
+
 ## [0.10] – 2026-08-16
 
 ### Changed

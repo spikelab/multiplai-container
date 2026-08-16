@@ -32,6 +32,44 @@ deny() { echo "DENIED: $1" >&2; exit 1; }
 # $HOME is the account this forced command already runs as.
 HOST_BROWSER_FLAG="$HOME/.local/state/multiplai/host-browser-enabled"
 
+# ---------------------------------------------------------------------------
+# The filesystem boundary (issue mktplace#15)
+# ---------------------------------------------------------------------------
+#
+# This gateway enforces a COMMAND ALLOWLIST. Until now it enforced no
+# FILESYSTEM BOUNDARY, and those are different controls. The forced command
+# runs with cwd = the host user's HOME and no branch inspected path arguments,
+# so `mlx_whisper --output-dir .` wrote into ~ on the Mac — outside the
+# workspace, invisible to the container. Every allowlisted command that takes
+# an output path could be pointed anywhere the host user can write.
+#
+# The workspace cannot be supplied by the container: a value arriving from the
+# side being confined is not a boundary. It has to be declared host-side, by
+# the same reasoning (and in the same directory) as HOST_BROWSER_FLAG above —
+# a file the container has no route to write.
+#
+# multiplai-kit's setup.sh writes it, because setup.sh already knows $WORKSPACE
+# and already installs this gateway.
+WORKSPACE_DECL="$HOME/.local/state/multiplai/workspace"
+
+# The sandbox profile ships from this repo through the same install_host_tool
+# loop as the gateway itself, so it can never be a release out of step with the
+# branch that uses it.
+CONFINE_PROFILE="$HOME/.local/state/multiplai/confine.sb"
+
+WS=""
+if [ -f "$WORKSPACE_DECL" ]; then
+  # One absolute path, first line only. Anything else is a malformed
+  # declaration and is treated as no declaration at all — a half-understood
+  # boundary is worse than a known-absent one.
+  WS="$(head -n 1 "$WORKSPACE_DECL" 2>/dev/null)"
+  WS="${WS%%$'\r'}"
+  if [[ "$WS" != /* ]] || [[ ! -d "$WS" ]]; then
+    deny "workspace declaration at $WORKSPACE_DECL is not an existing absolute path.
+        Re-run ./setup.sh on the Mac to rewrite it."
+  fi
+fi
+
 CMD="$SSH_ORIGINAL_COMMAND"
 [ -z "$CMD" ] && deny "interactive shell not allowed"
 
@@ -124,6 +162,19 @@ url_ok() {
 }
 
 allow=0
+
+# Two per-command properties, both deny-by-default like everything else here.
+#
+#   NEEDS_WS  this command takes or writes paths, so it must not run without a
+#             declared workspace. Absent declaration -> denied (fail closed).
+#   SANDBOX   this command should additionally run inside sandbox-exec.
+#
+# A branch that clears either flag has to say why. "It probably doesn't write
+# anything" is not a reason; "it takes no path argument and this branch already
+# validates every word against a label charset" is.
+NEEDS_WS=1
+SANDBOX=1
+
 case "$c1" in
   xcodebuild|xcsift|xcodegen|mlx-whisper|mlx_whisper) allow=1 ;;
   agent-browser)
@@ -160,6 +211,16 @@ case "$c1" in
         (( i++ ))
       done
     fi
+    # Deliberately outside the workspace jail, and this is a stated gap, not an
+    # oversight. `ab` drives a browser whose profile, cookie store and cache all
+    # live under ~/Library/Application Support/Google/Chrome; confining it to
+    # $WORKSPACE would either break it outright or require exempting the very
+    # directories that hold the credentials. A jail that must exempt the thing
+    # worth protecting is not a jail, so this capability keeps the control it
+    # already has — the explicit host opt-in checked immediately above — rather
+    # than gaining a second one that does not fit it.
+    NEEDS_WS=0
+    SANDBOX=0
     allow=1
     ;;
   swift)   [[ "$c2" == (build|run|test|package|--version) ]] && allow=1 ;;
@@ -171,8 +232,12 @@ case "$c1" in
     [[ "$c2" == (query|search|vsearch|status|embed|update|ls|get|multi-get) ]] && allow=1
     ;;
   xcrun)   [[ "$c2" == (simctl|xcresulttool|devicectl) ]] && allow=1 ;;
-  command) [[ "$c2" == "-v" ]] && allow=1 ;;
-  open)    [[ "$c2" == "-a" && "${words[3]}" == Simulator* ]] && allow=1 ;;
+  # Takes a command NAME and prints a path; writes nothing, reads no argument
+  # as a path. Requiring a declared workspace for it would break the one probe
+  # a session uses to find out whether the bridge works at all.
+  command) [[ "$c2" == "-v" ]] && { NEEDS_WS=0; SANDBOX=0; allow=1; } ;;
+  # Two fixed words and an app name matched against `Simulator*`. No path.
+  open)    [[ "$c2" == "-a" && "${words[3]}" == Simulator* ]] && { NEEDS_WS=0; SANDBOX=0; allow=1; } ;;
   pkill)
     # Only allow killing the simulator/build processes this gateway exists for,
     # by exact name — never a bare `pkill -f .` that could reap host processes.
@@ -187,7 +252,10 @@ case "$c1" in
       (( i++ ))
     done
     case "$target" in
-      Simulator|com.apple.CoreSimulator.*|xcodebuild|swift|swift-frontend|XCTest|testmanagerd) allow=1 ;;
+      # Signals a process by exact name — no path argument exists to confine,
+      # and the target list above is already the boundary.
+      Simulator|com.apple.CoreSimulator.*|xcodebuild|swift|swift-frontend|XCTest|testmanagerd)
+        NEEDS_WS=0; SANDBOX=0; allow=1 ;;
       *) deny "pkill target not allowed: ${target:-<none>}" ;;
     esac
     ;;
@@ -222,6 +290,13 @@ case "$c1" in
     # the verb depend on the user's shell profile. This substitutes a HOST-SIDE
     # CONSTANT for argv[0] — no client string is re-parsed by a shell, so the
     # gateway's invariant (argv travels as data) is untouched.
+    # Takes a flag and an app name validated to `[A-Za-z0-9._-]` above — no path
+    # can be expressed. It reaches the Keychain, which needs a mach-lookup to
+    # securityd and a write to the keychain file: both outside any workspace, so
+    # a workspace jail is the wrong shape of control for it. Its boundary is the
+    # argv validation directly above.
+    NEEDS_WS=0
+    SANDBOX=0
     words[1]="$HOME/.local/bin/multiplai-gh-token"
     allow=1
     ;;
@@ -278,6 +353,13 @@ case "$c1" in
     # Same argv[0] pin as multiplai-gh-token: ~/.local/bin is not on the login
     # PATH, and this substitutes a HOST-SIDE CONSTANT — no client string is
     # re-parsed by a shell, so argv still travels as data.
+    # Every word above is a label — verb, profile, instance, service, numeric
+    # tail, charset-checked guest argv — and the compose file it runs is one the
+    # host owner froze in advance. The container cannot express a path here. It
+    # also needs the Docker socket, which no workspace jail can contain. Its
+    # boundary is the frozen profile plus the argv validation above.
+    NEEDS_WS=0
+    SANDBOX=0
     words[1]="$HOME/.local/bin/multiplai-docker.py"
     allow=1
     ;;
@@ -304,11 +386,62 @@ case "$c1" in
       [[ "$u" == *://* ]] && seen=1
       (( i++ ))
     done
+    # Every flag that could write a file (-o, -O, --output, --output-dir,
+    # --create-dirs, -T, --cookie-jar, -D, --trace*) is denied by the loop
+    # above, and every URL must be loopback. This branch can only write to
+    # stdout, so there is no path for a workspace to bound.
+    NEEDS_WS=0
+    SANDBOX=0
     (( seen )) && allow=1
     ;;
 esac
 
 (( allow )) || deny "command not in allowlist: $CMD"
+
+# --- the filesystem boundary, enforced -------------------------------------
+#
+# FAIL CLOSED. A path-taking command with no declared workspace is denied
+# outright rather than run unconfined. Running unconfined and warning would
+# leave the control off by default, which is the state that produced this bug;
+# an announced break is the honest shape for a control that exists because the
+# previous default was wrong.
+if (( NEEDS_WS )) && [ -z "$WS" ]; then
+  deny "no workspace declared on this host, so \`$c1\` is not allowed to run.
+        This gateway confines path-taking commands to your workspace, and it
+        cannot take that path from the container — the side being confined.
+        On the Mac, run:
+          ./setup.sh          (from your multiplai-kit checkout)
+        or declare it by hand:
+          mkdir -p ~/.local/state/multiplai
+          echo /absolute/path/to/your/workspace > ~/.local/state/multiplai/workspace
+        Commands that take no path (command -v, pkill, open -a Simulator,
+        multiplai-gh-token, multiplai-docker, curl) keep working without it."
+fi
+
+if [ -n "$WS" ]; then
+  if [ -n "$WORKDIR" ]; then
+    # An explicit `cd` prefix may not leave the workspace. Resolve symlinks
+    # before comparing: a symlink inside the workspace pointing out of it would
+    # otherwise pass a pure string test. `-P` makes cd resolve physically, and
+    # $PWD after it is the real path.
+    real_wd="$(cd -P -- "$WORKDIR" 2>/dev/null && pwd -P)" \
+      || deny "cd failed: $WORKDIR"
+    real_ws="$(cd -P -- "$WS" 2>/dev/null && pwd -P)" \
+      || deny "declared workspace is unreadable: $WS"
+    if [[ "$real_wd" != "$real_ws" && "$real_wd" != "$real_ws"/* ]]; then
+      deny "cd target is outside the declared workspace.
+        requested: $real_wd
+        workspace: $real_ws"
+    fi
+    WORKDIR="$real_wd"
+  elif (( NEEDS_WS )); then
+    # No explicit prefix: pin cwd to the workspace instead of inheriting the
+    # host user's HOME. This alone fixes the escape the issue observed —
+    # `mlx_whisper --output-dir .` resolved to ~ because that is where the
+    # forced command started.
+    WORKDIR="$WS"
+  fi
+fi
 
 # Run in a login shell for PATH, but pass argv as data: the inner `exec "$@"`
 # receives the already-tokenized words and never re-parses them. Prepend
@@ -322,11 +455,42 @@ esac
 if [ -n "$WORKDIR" ]; then
   cd -- "$WORKDIR" 2>/dev/null || deny "cd failed: $WORKDIR"
 fi
+
+# The jail itself. `sandbox-exec` denies writes by default and allows them back
+# under the declared workspace plus the caches a build genuinely needs; reads
+# and network stay open (source, models, config, loopback CDP). `-D` passes the
+# workspace as a parameter so the shipped profile carries no hardcoded path.
+#
+# Prepended INSIDE the argv, before `zsh -lc`, so the whole login shell and
+# everything it spawns inherits the sandbox — wrapping only the final command
+# would leave a build's child processes outside it.
+#
+# If the profile is not installed, cwd pinning and the WORKDIR containment
+# above still apply; only this layer is missing. That degradation is
+# deliberate: a profile that turns out to be wrong for one tool can be moved
+# aside on the host without losing the boundary that fixes the reported escape,
+# and the host owner can see which state they are in by whether the file
+# exists. It is not a container-reachable switch — same directory, same trust
+# model as the workspace declaration itself.
+sandbox_prefix=()
+if (( SANDBOX )) && [ -n "$WS" ] && [ -f "$CONFINE_PROFILE" ] \
+   && [ -x /usr/bin/sandbox-exec ]; then
+  # HOME is passed explicitly rather than relied on as a built-in: the profile
+  # uses it for the per-tool cache paths, and sandbox-exec only defines the
+  # parameters given here.
+  sandbox_prefix=(
+    /usr/bin/sandbox-exec
+      -D "WORKSPACE=$WS"
+      -D "HOME=$HOME"
+      -f "$CONFINE_PROFILE"
+  )
+fi
+
 if (( XCSIFT )); then
   # Trusted, fixed pipeline: the user words run as argv data via "$@"; the
   # xcsift stage is a hardcoded constant (never from client input). pipefail so
   # the build/test exit status wins over xcsift's. Can't use the final `exec`
   # here — a pipeline needs the shell to stay alive to wire both stages.
-  exec zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); set -o pipefail; "$@" 2>&1 | xcsift --format toon --quiet' zsh "${words[@]}"
+  exec "${sandbox_prefix[@]}" zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); set -o pipefail; "$@" 2>&1 | xcsift --format toon --quiet' zsh "${words[@]}"
 fi
-exec zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); exec -- "$@"' zsh "${words[@]}"
+exec "${sandbox_prefix[@]}" zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); exec -- "$@"' zsh "${words[@]}"

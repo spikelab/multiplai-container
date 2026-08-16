@@ -58,6 +58,39 @@ allowlists by command. When widening the allowlist, preserve that invariant
 (strip only known-safe literal wrappers, exec user argv as data). Ship changes
 through `release.sh` like everything else.
 
+**It enforces two independent controls, and a new branch must answer for both.**
+The command allowlist says *what may run*; the workspace jail says *where it may
+write*. Adding a `case` arm without thinking about the second one is the bug
+mktplace#15 reported — the allowlist was complete and the boundary did not
+exist.
+
+Every branch therefore sets two flags, both deny-by-default:
+
+- `NEEDS_WS` — the command takes or writes paths, so it must not run without a
+  declared workspace. **Leave it at 1 unless the branch can state why no path
+  is expressible**, and put that reason in the code. "Probably doesn't write
+  anything" is not a reason; "every word is validated against a label charset
+  above" is. The five branches that clear it (`command -v`, `pkill`, `open -a`,
+  `multiplai-gh-token`, `multiplai-docker`, `curl`) each carry theirs.
+- `SANDBOX` — additionally wrap in `sandbox-exec` with `confine.sb`.
+
+**Host-owned state is the trust model, and `$XDG_STATE_HOME` is deliberately not
+read.** The workspace declaration (`~/.local/state/multiplai/workspace`), the
+host-browser flag, and the profile all live in one directory the container has
+no route to write. A value arriving from the container is not a boundary, and
+neither is a path the remote side could steer — sshd can be configured to accept
+client environment variables.
+
+**`confine.sb` and this script are one release.** The gateway names the profile;
+the kit's `install_host_state` ships it beside the gateway's `install_host_tool`
+for that reason. Never let them travel separately.
+
+**What the harness can and cannot tell you.** `tests/gateway-test.sh` covers the
+whole decision — 104 cases including the workspace jail — and runs on Linux
+against a static zsh (`GATEWAY_TEST_ZSH=…`). It cannot tell you whether
+`sandbox-exec` accepts the profile or whether a given tool still works under it:
+that is macOS-only, and it is a host smoke test, once, per tool.
+
 ## Editing `multiplai-docker.py`
 
 It lets a container run Compose stacks on the host, so its safety rests on one
