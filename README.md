@@ -85,6 +85,30 @@ a profile, a verb, an instance and a service — see
 > just "a locked-down SSH shell". Only enable it for containers running code
 > you trust.
 
+#### The host browser is off by default
+
+`ab` / `agent-browser` is the one allowlisted tool that reaches your **real
+logged-in Chrome** — every cookie, every signed-in app. Enabling the bridge does
+not enable it. The gateway refuses the verb unless a flag file exists on the
+Mac:
+
+```bash
+mkdir -p ~/.local/state/multiplai
+touch ~/.local/state/multiplai/host-browser-enabled     # on
+rm ~/.local/state/multiplai/host-browser-enabled        # off
+```
+
+The flag is a host file precisely because **nothing in the container can create
+it** — there is no route from a session to the Mac's home directory, and the
+gateway does not read `$XDG_STATE_HOME`, so the location cannot be steered from
+the side being gated. A blocked run prints the path and both commands, so a
+session that needs the browser tells you exactly what to type.
+
+Turning it on grants the whole capability, not a slice of it: once enabled, the
+container drives Chrome at large. The one thing still refused is a `file:` URL
+on a navigation verb (`open`/`goto`/`navigate`), which would otherwise read any
+host file Chrome can reach.
+
 ```bash
 # On the Mac host:
 ssh-keygen -t ed25519 -f ~/.ssh/build_key -N ''      # container's key

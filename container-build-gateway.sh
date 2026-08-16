@@ -24,6 +24,14 @@ setopt no_glob no_nomatch
 
 deny() { echo "DENIED: $1" >&2; exit 1; }
 
+# Opt-in gate for the host browser. See the `agent-browser` branch below.
+#
+# The path is XDG's default state directory, but $XDG_STATE_HOME is deliberately
+# NOT read: sshd can be configured to accept environment variables from the
+# client, and a gate whose location the remote side might steer is not a gate.
+# $HOME is the account this forced command already runs as.
+HOST_BROWSER_FLAG="$HOME/.local/state/multiplai/host-browser-enabled"
+
 CMD="$SSH_ORIGINAL_COMMAND"
 [ -z "$CMD" ] && deny "interactive shell not allowed"
 
@@ -119,12 +127,32 @@ allow=0
 case "$c1" in
   xcodebuild|xcsift|xcodegen|mlx-whisper|mlx_whisper) allow=1 ;;
   agent-browser)
+    # OPT-IN, and this is the gate — not the skill's prose. `ab` drives the
+    # host's REAL logged-in Chrome: every session it holds, every cookie, every
+    # authenticated app. That is a capability a host owner should grant on
+    # purpose, and until now the only thing standing between a session and it
+    # was that the skill stopped advertising itself (kit #60), which is a hint,
+    # not a control — anything that knows the verb still reached Chrome.
+    #
+    # The switch is a file on the Mac. It has to be something the container
+    # cannot write, or the agent flips its own gate: there is no route from the
+    # container to the host's $HOME, and an environment variable would arrive
+    # from the side being gated. Absent flag, absent capability.
+    if [[ ! -f "$HOST_BROWSER_FLAG" ]]; then
+      deny "host browser is not enabled on this host.
+        To turn it on, run this on the Mac:
+          mkdir -p ~/.local/state/multiplai
+          touch ~/.local/state/multiplai/host-browser-enabled
+        To turn it off again: rm ~/.local/state/multiplai/host-browser-enabled
+        It grants a session the real logged-in Chrome — every cookie and every
+        signed-in app on this machine. Nothing in the container can set it."
+    fi
     # SECURITY: `ab` drives the host's REAL Chrome, which can open file:/// URLs
     # and read ANY host file Chrome can reach — the exact host-file exfiltration
     # the curl url_ok()/file: guard exists to block. Apply the same file:-scheme
     # block to navigation verbs so `ab open file:///etc/passwd` is denied.
-    # (Note: the bridge still lets the container drive the host browser at large;
-    # see README ▸ macOS host bridge for the trust caveat.)
+    # (Note: once enabled, the bridge lets the container drive the host browser
+    # at large; see README ▸ macOS host bridge for the trust caveat.)
     if [[ "$c2" == (open|goto|navigate) ]]; then
       i=3
       while (( i <= ${#words} )); do

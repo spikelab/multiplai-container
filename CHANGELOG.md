@@ -16,6 +16,40 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Changed
+
+- **The host browser is now opt-in, and this is the gate.** `agent-browser` /
+  `ab` is the one allowlisted verb that reaches your **real logged-in Chrome** —
+  every cookie, every signed-in app. The gateway now refuses it unless a flag
+  file exists on the Mac:
+
+  ```bash
+  mkdir -p ~/.local/state/multiplai
+  touch ~/.local/state/multiplai/host-browser-enabled     # on
+  rm ~/.local/state/multiplai/host-browser-enabled        # off
+  ```
+
+  **Advancing your pin turns the host browser off** until you create that file.
+  Nothing else on the allowlist changes.
+
+  Until now the only thing between a session and Chrome was that the skill had
+  stopped advertising itself (kit #60) — a hint, not a control: anything that
+  knew the verb still reached the browser. The switch is a host file precisely
+  because nothing in the container can write one; an environment variable would
+  arrive from the side being gated, which is why `$XDG_STATE_HOME` is
+  deliberately not read even though the path is its default. A blocked run
+  prints the path and both commands, so a session that needs the browser tells
+  you what to type.
+
+  The gate is checked **before** the existing `file:`-scheme block, so a
+  `file:` URL with the browser off is refused as "not enabled" rather than as a
+  scheme problem — a message that taught the wrong fix. Once enabled, the
+  `file:` block on `open`/`goto`/`navigate` applies exactly as before.
+
+  `tests/gateway-test.sh` covers it: 83 passed, and the nine new cases include
+  the first coverage the `file:` block has ever had. Five of them fail against
+  the pre-change gateway.
+
 ## [0.9.6] – 2026-08-11
 
 ### Added

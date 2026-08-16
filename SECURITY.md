@@ -28,9 +28,15 @@ gateway is a strict allowlist, but the tools it allows are powerful *by design*:
   an untrusted checkout over the bridge is running its code on your Mac.
 - `ab` drives **the host's real, logged-in Chrome**. Anything that browser can
   reach or read — sessions, cookies, local files it can open — is reachable
-  through it. (Navigation to `file:` URLs is blocked, and `curl` is restricted
-  to http/https on loopback with a flag allowlist, precisely because these are
-  the exfiltration paths. Treat those as hardening, not as a boundary.)
+  through it. This one verb is **opt-in on top of the bridge**: the gateway
+  refuses it unless `~/.local/state/multiplai/host-browser-enabled` exists on
+  the Mac. Nothing in the container can create that file, and the gateway does
+  not read `$XDG_STATE_HOME`, so the location cannot be steered from the side
+  being gated. Deleting the file revokes the capability with no restart.
+  (Once enabled, navigation to `file:` URLs is still blocked, and `curl` is
+  restricted to http/https on loopback with a flag allowlist, precisely because
+  these are the exfiltration paths. Treat those as hardening, not as a
+  boundary.)
 - `multiplai-gh-token` lets the container **mint a GitHub App installation
   token** whenever the host holds that App's private key. That is the feature,
   not a leak: minting is precisely what the verb authorises. The mitigation is
