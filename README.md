@@ -174,7 +174,24 @@ NOT in this image — add it via an overlay, below.
 
 The base image stays generic; anything one project needs (extra apt packages, a
 cloud CLI, a locale) goes in a small **overlay Dockerfile kept in that
-project's own repo**, built on top of the base with `build-overlay.sh`:
+project's own repo**, built on top of the base.
+
+Register overlays in `overlays.conf` next to your `.env` (kit root, or this
+directory when standalone) — one `name:path` per line, path absolute,
+`~`-prefixed, or relative to `WORKSPACE`:
+
+```
+# built as claude-multiplai-<name>:local
+myproject:PROJECTS/myproject/claude-overlay
+```
+
+`./build.sh` (and therefore the kit's `./setup.sh`) then rebuilds the base
+**and every registered overlay** in one run. Docker's layer cache makes an
+unchanged entry a no-op in seconds; a changed base or a changed overlay
+Dockerfile rebuilds automatically. A failing overlay warns without failing the
+base build.
+
+One-off builds work too, without registering:
 
 ```bash
 ./build-overlay.sh --dir path/to/your-project/claude-overlay \
@@ -200,8 +217,8 @@ standalone, in `.env` or the `docker run` image argument.
 
 `build-overlay.sh` stamps the base image's ID into the overlay as a label
 (`multiplai.base-image-id`), and the kit's `claude.sh` compares it at launch —
-so when a release rebuilds the base, you get a warning to re-run
-`build-overlay.sh` instead of silently running on the old base.
+so if an overlay build failed or was skipped after a base rebuild, you get a
+warning to re-run `./build.sh` instead of silently running on the old base.
 
 ## Files
 

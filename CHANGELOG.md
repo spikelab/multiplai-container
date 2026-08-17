@@ -19,16 +19,21 @@ sandboxed Claude Code container) and predates this changelog.
 ### Added
 
 - **Overlay images: project-specific tooling now builds on top of the base
-  image instead of into it.** New `build-overlay.sh` builds a small Dockerfile
-  kept in the consuming project's repo (`FROM ${BASE_IMAGE}`, add packages,
-  back to `USER agent`) into a separately named image, e.g.
-  `claude-multiplai-myproject:local`. Select it per launch with
-  `IMAGE_NAME=<overlay tag>` in an `env.<profile>` file — the kit's launcher
-  already resolves its image default after sourcing profiles, so no launcher
-  change is needed. The overlay is stamped with the base image's name and ID
-  as labels (`multiplai.base-image-name` / `multiplai.base-image-id`) so the
-  launcher can warn when a base rebuild leaves an overlay stale. See the
-  README's "Overlay images" section for the Dockerfile contract.
+  image instead of into it.** An overlay is a small Dockerfile kept in the
+  consuming project's repo (`FROM ${BASE_IMAGE}`, add packages, back to
+  `USER agent`), built into a separately named image. Register overlays in
+  `overlays.conf` next to your `.env` (`name:path` lines, gitignored) and
+  `./build.sh` — and therefore the kit's `./setup.sh` — rebuilds the base
+  **and every registered overlay** in one run; Docker's layer cache makes an
+  unchanged entry a no-op, and a changed base or overlay Dockerfile rebuilds
+  automatically. `build-overlay.sh` is the per-overlay builder (usable
+  standalone) and stamps the base image's name and ID as labels
+  (`multiplai.base-image-name` / `multiplai.base-image-id`) so the kit's
+  launcher can warn when an overlay is left behind on an older base. Select
+  an overlay per launch with `IMAGE_NAME=claude-multiplai-<name>:local` in an
+  `env.<profile>` file — the launcher already resolves its image default
+  after sourcing profiles, so no launcher change is needed. See the README's
+  "Overlay images" section for the Dockerfile contract.
 
 ### Removed
 
