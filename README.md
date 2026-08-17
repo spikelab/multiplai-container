@@ -109,17 +109,50 @@ container drives Chrome at large. The one thing still refused is a `file:` URL
 on a navigation verb (`open`/`goto`/`navigate`), which would otherwise read any
 host file Chrome can reach.
 
+#### The bridge confines commands to a declared workspace
+
+The gateway is a command allowlist, and separately a **filesystem boundary**.
+It pins the working directory to a workspace you declare on the Mac, refuses a
+`cd` prefix that leaves it, refuses absolute path arguments pointing outside it,
+and runs the command under `sandbox-exec` with the shipped `confine.sb` profile
+(writes denied by default, allowed back under the workspace plus the caches
+builds need; reads and network stay open).
+
+**The workspace has to be declared host-side** — a boundary supplied by the
+container is not a boundary — and path-taking commands (`swift`, `xcodebuild`,
+`xcrun`, `xcodegen`, `xcsift`, `mlx-whisper`, `qmd`) are **denied until it
+exists**. `./setup.sh` from a multiplai-kit checkout writes it and installs the
+profile for you; the manual block below does the same by hand.
+
+`/` and your home directory are both refused as workspace values — either would
+switch the boundary off. A subdirectory of `$HOME` is the normal case.
+
 ```bash
 # On the Mac host:
 ssh-keygen -t ed25519 -f ~/.ssh/build_key -N ''      # container's key
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin ~/.local/state/multiplai
 cp container-build-gateway.sh ~/.local/bin/ && chmod +x ~/.local/bin/container-build-gateway.sh
+
+# Declare the workspace the bridge may write in (one absolute path, first line):
+echo /absolute/path/to/your/workspace > ~/.local/state/multiplai/workspace
+
+# Install the sandbox profile the gateway names. It is DATA, not a tool, so it
+# goes in ~/.local/state/multiplai — not on $PATH — beside the declaration
+# above. Without it the argv-level checks still apply, but a build's child
+# processes are no longer confined at all.
+cp confine.sb ~/.local/state/multiplai/ && chmod 644 ~/.local/state/multiplai/confine.sb
+
 # Prefix the PUBLIC key in ~/.ssh/authorized_keys with the forced command:
 #   restrict,command="~/.local/bin/container-build-gateway.sh" ssh-ed25519 AAAA... container-builds
 # (An absolute path — e.g. /Users/you/.local/bin/container-build-gateway.sh —
 #  is more robust than "~", which sshd does not always expand in command=.)
 # Enable System Settings ▸ General ▸ Sharing ▸ Remote Login.
 ```
+
+If a bridge command ever fails with an unexplained sandbox denial, take the
+profile out of the loop with
+`mv ~/.local/state/multiplai/confine.sb{,.off}` — the gateway treats a missing
+profile as "that layer is off" and keeps the rest — and please open an issue.
 
 Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 (`$HOME/.ssh/build_key`) in `.env`, and mount the key into the container:
@@ -149,7 +182,8 @@ Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 | `ab` | Drive Vercel `agent-browser` against the host's real Chrome over the SSH bridge |
 | `apple-containers-experiment.sh` | Experimental: Apple `container` runtime instead of Docker |
 | `build.sh` | Builds the image from `.env` config (kit root `.env`, or one next to this script) |
-| `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac |
+| `confine.sb` | `sandbox-exec` profile the gateway wraps path-taking commands in — installs to `~/.local/state/multiplai/confine.sb` (data, not a tool), takes the workspace as a `-D` parameter |
+| `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac, and confines it to the declared workspace |
 | `md2pdf` | Markdown→PDF wrapper baked into the image (`pandoc --pdf-engine=typst`) |
 | `multiplai-docker.py` | Host-side runner for pre-frozen Docker Compose stacks — parallel named instances over the bridge, agent input never reaches Compose (setup: [docs/multiplai-docker.md](docs/multiplai-docker.md)) |
 | `docs/multiplai-docker.md` | Host setup for `multiplai-docker`: freezing a profile, the verb list, worktree instances, threat model |

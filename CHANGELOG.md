@@ -16,6 +16,172 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **The host bridge now confines path-taking commands to your workspace.** It
+  has always enforced a *command allowlist*; it enforced no *filesystem
+  boundary*, and those are different controls. The forced command ran with cwd
+  = your home directory and no branch inspected path arguments, so
+  `mlx_whisper --output-dir .` wrote into `~` on the Mac — outside the
+  workspace, invisible to the container. Any allowlisted command taking an
+  output path could be pointed anywhere you can write.
+
+  Four layers now apply, in order: cwd is pinned to the declared workspace
+  instead of `$HOME`; an explicit `cd` prefix is rejected when it resolves
+  outside the workspace (symlinks resolved, so a link out of the tree does not
+  launder it); **absolute path arguments** are rejected when they point outside
+  it — `xcodebuild -derivedDataPath /Users/you/x`, `mlx_whisper --output-dir
+  /Users/you/Desktop`, `swift build --scratch-path ../../..` — with the system
+  toolchain prefixes (`/Applications/Xcode*.app`, `/Library/Developer`, `/usr`,
+  `/opt/homebrew`) and the temporary directories still allowed, because reads
+  stay open by design; and the command runs under `sandbox-exec` with the
+  shipped `confine.sb` profile, which denies writes by default and allows them
+  back under the workspace plus the caches builds genuinely need. Reads and
+  network stay open — SDKs, model weights and config all live outside any
+  workspace, and confining reads is not what was reported.
+
+  **What the sandbox layer is, precisely.** It is a guardrail against
+  *accidental and stray* writes — a tool that defaults to `$HOME`, an argument
+  the checks above did not anticipate. It is **not** a boundary against code
+  the container controls: `mach-lookup` and `process-exec` are unfiltered in
+  the profile, so confined code can reach launchd/XPC and have an unconfined
+  process act for it. That matters because `swift build` runs package-manifest
+  and plugin code from the checkout by design. Filtering `mach-lookup` by
+  service name would require a complete, version-dependent enumeration for
+  every toolchain here, and an incomplete one breaks the tool outright rather
+  than degrading — so the gap is documented in `confine.sb` (with the procedure
+  for closing it) instead of being papered over. The bridge's trust model is
+  unchanged: enable it only for containers running code you trust.
+
+  **Verified on macOS 2026-08-17**, because a profile `sandbox-exec` cannot
+  compile fails every bridge command and the test harness runs on Linux: the
+  profile compiles; `mlx_whisper --help`, `xcodebuild -version`,
+  `swift --version` and `qmd --help` all exit 0 under it (Metal init included);
+  a write inside the workspace succeeds and `touch ~/.sbtest-outside` returns
+  `Operation not permitted` with no file created. The first run of that smoke
+  test found `(deny file-write* (with report))`, which macOS rejects outright —
+  fixed here.
+
+  **Install order matters.** The profile is installed by multiplai-kit's
+  `install_host_state` from its *pinned* `container/` checkout, so between this
+  tag and the kit's `CONTAINER_REF` bump every host runs with the sandbox layer
+  absent and only the argv-level layers active. That is the normal state for a
+  while, not an error.
+
+### ⚠️ Breaking
+
+- **The bridge now needs a declared workspace, and refuses path-taking commands
+  without one.** The workspace cannot come from the container: a boundary
+  supplied by the side being confined is not a boundary. It is read from
+  `~/.local/state/multiplai/workspace` — one absolute path, host-owned, the
+  same trust model as the host-browser flag.
+
+  **Run `./setup.sh` from your multiplai-kit checkout after taking this tag.**
+  It writes the file, installs the profile, and you are done. Until it runs,
+  `swift`, `xcodebuild`, `xcrun`, `xcodegen`, `xcsift`, `mlx-whisper` and `qmd`
+  are denied with a message naming the fix. To declare it by hand instead:
+
+  ```
+  mkdir -p ~/.local/state/multiplai
+  echo /absolute/path/to/your/workspace > ~/.local/state/multiplai/workspace
+  ```
+
+  This is a deliberate, announced break rather than a warn-and-run default. A
+  control that is off until someone opts in is the state that produced the bug.
+
+  **Unaffected**, because they cannot express a path: `command -v`, `pkill`,
+  `open -a Simulator`, `multiplai-gh-token`, `multiplai-docker`, `curl`.
+
+  **`agent-browser` is deliberately outside the jail**, and that is a stated
+  gap rather than an oversight. It drives a browser whose profile and cookie
+  store live under `~/Library`; confining it to the workspace would either
+  break it or require exempting exactly the directories worth protecting. It
+  keeps the control that fits it — the explicit host opt-in added in 0.10.
+
+  If a tool misbehaves under the profile, moving
+  `~/.local/state/multiplai/confine.sb` aside drops only the `sandbox-exec`
+  layer; cwd pinning, `cd` containment and the path-argument check still apply.
+
+- **`/` and your home directory are refused as workspace values.** Both used to
+  pass the "absolute and a directory" test while switching the boundary off:
+  `cd` containment would admit everything reachable, and the profile's
+  `(subpath (param "WORKSPACE"))` would hand back write access to the whole home
+  directory including `~/.ssh`. A subdirectory of `$HOME` is the normal case and
+  is unaffected.
+
+### Fixed
+
+- **`curl` over the bridge could read and write arbitrary host files.** Its
+  branch was a deny-list of six flags behind a header calling itself an
+  allowlist, and it cleared both the workspace and sandbox flags on the strength
+  of that claim. Verified against curl 8.5.0: `--stderr <f>` and `--libcurl <f>`
+  create or truncate any path (the second including caller-controlled request
+  headers); `--remote-name-all` writes the response body into the cwd — the host
+  user's home directory — under a *server*-chosen filename; `-w @<f>`,
+  `-b <f>` and `--etag-compare <f>` read a host file into stdout, which the
+  bridge returns to the container; `--etag-save`, `--hsts` and `--alt-svc` write;
+  and `--proxy evil.com:8080` gave arbitrary outbound egress from the Mac while
+  the URL argument stayed loopback.
+
+  The branch is now a real allowlist: a named set of flags with their value
+  shapes, both `--flag value` and `--flag=value` spellings, clustered short
+  flags checked letter by letter, and **every unrecognised flag denied** —
+  including ones curl has not shipped yet. `@file` values are refused for every
+  option that honours them. `~/.curlrc` is disabled with a gateway-supplied
+  `-q`, so a stray `output` line there cannot reintroduce the file write.
+  Targets must still be loopback `http`/`https`, and a value with no scheme is
+  now a denial rather than a pass. The one real caller — the host-browser
+  skill's `curl -s --max-time 5 http://127.0.0.1:9222/json/version` — is
+  covered by a test.
+
+- **`url_ok()` returned "fine" for any argument without a scheme, and matched
+  the host by string prefix.** The first let `--proxy evil.com:8080` and a bare
+  `curl evil.com` through. The second let `http://localhost:8000@evil.com/`
+  through — the character after `localhost` was a `:`, so the prefix matched,
+  while curl reads `localhost:8000` as userinfo and connects to `evil.com`. It
+  now parses the authority out, refuses userinfo, requires a numeric port, and
+  is applied only to words that are meant to be targets.
+
+- **`open -a` matched the app name with a prefix glob and ignored trailing
+  arguments.** `open -a` accepts a *path* as readily as a registered app name,
+  so `Simulator/../Evil.app` matched `Simulator*` — and with the workspace
+  bind-mounted read-write, a container could write `$WS/Evil.app`, send
+  `cd $WS && open -a Simulator/../Evil.app`, and have LaunchServices start it
+  outside any sandbox (the branch clears both flags). The app name is now
+  matched exactly, and the command must be exactly `open -a <app>`.
+
+- **The `cd` that was checked was not the `cd` that ran.** Containment was
+  probed in a subshell and the real `cd` happened later, so the container —
+  which has the workspace mounted read-write — could swap an intermediate
+  directory for a symlink in between and have the second `cd` resolve
+  elsewhere. The gateway now does one `cd -P` and verifies `pwd -P` from the
+  directory it is standing in.
+
+- **The two enforcement layers could disagree about which string is the
+  workspace.** The `cd` check compared symlink-resolved paths while
+  `sandbox-exec` was handed the raw declared value, and SBPL `(subpath …)` is
+  matched by the kernel against resolved paths. A declaration that was itself a
+  symlink therefore passed containment while every write under the real
+  directory was denied, with nothing naming the cause. The declared value is now
+  resolved once, up front, and that single value feeds both layers.
+
+- **`confine.sb` denied operations the allowlisted toolchains need.**
+  `(deny default)` denies anything unnamed, and `iokit-open` /
+  `iokit-get-properties` (Metal — `mlx-whisper` is MLX on Apple Silicon and
+  initialises a Metal device before anything else), `process-info*`
+  (`xcodebuild` inspecting and reaping children), `system-socket`,
+  `mach-register`, `file-ioctl` and `pseudo-tty` were all missing. Added; none
+  of them widens the write policy.
+
+- **Documentation that described the wrong install mechanism.** The gateway and
+  the profile both claimed `confine.sb` ships through `install_host_tool`, which
+  would put it on `$PATH` at `~/.local/bin/confine.sb`. It is installed by
+  `install_host_state` to `~/.local/state/multiplai/confine.sb`. The README's
+  manual host-install block did not mention the workspace declaration or the
+  profile at all, so a reader following it end to end hit "no workspace
+  declared" with no explanation in the document that produced the state; both
+  the block and the file table now cover them.
+
 ## [0.10] – 2026-08-16
 
 ### Changed

