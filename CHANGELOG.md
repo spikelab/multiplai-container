@@ -16,6 +16,42 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **Overlay images: project-specific tooling now builds on top of the base
+  image instead of into it.** An overlay is a small Dockerfile kept in the
+  consuming project's repo (`FROM ${BASE_IMAGE}`, add packages, back to
+  `USER agent`), built into a separately named image. Register overlays in
+  `overlays.conf` next to your `.env` (`name:path` lines, gitignored) and
+  `./build.sh` — and therefore the kit's `./setup.sh` — rebuilds the base
+  **and every registered overlay** in one run; Docker's layer cache makes an
+  unchanged entry a no-op, and a changed base or overlay Dockerfile rebuilds
+  automatically. `build-overlay.sh` is the per-overlay builder (usable
+  standalone) and stamps the base image's name and ID as labels
+  (`multiplai.base-image-name` / `multiplai.base-image-id`) so the kit's
+  launcher can warn when an overlay is left behind on an older base. Select
+  an overlay per launch with `IMAGE_NAME=claude-multiplai-<name>:local` in an
+  `env.<profile>` file — the launcher already resolves its image default
+  after sourcing profiles, so no launcher change is needed. See the README's
+  "Overlay images" section for the Dockerfile contract. Guards:
+  `build-overlay.sh` verifies the built image really descends from the base
+  (a `FROM` that ignores the `BASE_IMAGE` arg is an error, since its
+  staleness labels would lie forever) and warns when the final `USER` is not
+  `agent`; `build.sh` refuses an `.env` whose `IMAGE_NAME` names a registered
+  overlay's tag, which would rebuild the tool-less base under the overlay's
+  name.
+
+### Removed
+
+- **BREAKING: Google Cloud SDK and Cloud SQL Auth Proxy are no longer in the
+  base image.** They were project-specific tooling (one GCP-backed project
+  used them) and cost roughly a gigabyte for every consumer. If you need
+  them, move the two removed Dockerfile blocks (gcloud apt repo + install,
+  `CSP_VERSION` binary download) into an overlay Dockerfile in your project's
+  repo and build it with `build-overlay.sh`. The kit's `GCP_KEY_FILE` mount
+  and `CLOUDSDK_*` env handling are unchanged and work as before once an
+  overlay provides the CLI.
+
 ## [0.11] – 2026-08-17
 
 ### Added

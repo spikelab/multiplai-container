@@ -33,28 +33,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Cloud SDK — key must be dearmored for signed-by to accept it.
-# gnupg is needed once for `gpg --dearmor` and removed afterwards.
-RUN apt-get update && apt-get install -y --no-install-recommends gnupg \
-    && curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
-        > /etc/apt/sources.list.d/google-cloud-sdk.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-        google-cloud-cli \
-        google-cloud-cli-gke-gcloud-auth-plugin \
-    && apt-get purge -y gnupg && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
-
-# Cloud SQL Auth Proxy v2 — standalone binary hosted on GCS, not as a GitHub
-# release asset. GitHub's "latest" tag picks the legacy v1 line because Google
-# still publishes both, so we pin v2 explicitly. Bump CSP_VERSION to update;
-# release notes at https://github.com/GoogleCloudPlatform/cloud-sql-proxy/releases
-ARG CSP_VERSION=v2.21.3
-RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL -o /usr/local/bin/cloud-sql-proxy \
-        "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/${CSP_VERSION}/cloud-sql-proxy.linux.${ARCH}" \
-    && chmod +x /usr/local/bin/cloud-sql-proxy
+# Project-specific tooling (gcloud, cloud-sql-proxy, MySQL, …) does NOT belong
+# here — it goes in an overlay image built on top of this one with
+# build-overlay.sh, from a Dockerfile kept in the consuming project's repo.
 
 # Markdown → PDF: pandoc + typst, two static binaries, zero system deps.
 # Canonical command: `pandoc input.md --pdf-engine=typst -o output.pdf`
