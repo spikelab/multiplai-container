@@ -16,6 +16,31 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **Overlay images: project-specific tooling now builds on top of the base
+  image instead of into it.** New `build-overlay.sh` builds a small Dockerfile
+  kept in the consuming project's repo (`FROM ${BASE_IMAGE}`, add packages,
+  back to `USER agent`) into a separately named image, e.g.
+  `claude-multiplai-myproject:local`. Select it per launch with
+  `IMAGE_NAME=<overlay tag>` in an `env.<profile>` file — the kit's launcher
+  already resolves its image default after sourcing profiles, so no launcher
+  change is needed. The overlay is stamped with the base image's name and ID
+  as labels (`multiplai.base-image-name` / `multiplai.base-image-id`) so the
+  launcher can warn when a base rebuild leaves an overlay stale. See the
+  README's "Overlay images" section for the Dockerfile contract.
+
+### Removed
+
+- **BREAKING: Google Cloud SDK and Cloud SQL Auth Proxy are no longer in the
+  base image.** They were project-specific tooling (one GCP-backed project
+  used them) and cost roughly a gigabyte for every consumer. If you need
+  them, move the two removed Dockerfile blocks (gcloud apt repo + install,
+  `CSP_VERSION` binary download) into an overlay Dockerfile in your project's
+  repo and build it with `build-overlay.sh`. The kit's `GCP_KEY_FILE` mount
+  and `CLOUDSDK_*` env handling are unchanged and work as before once an
+  overlay provides the CLI.
+
 ## [0.11] – 2026-08-17
 
 ### Added

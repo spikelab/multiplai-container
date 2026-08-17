@@ -43,7 +43,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
       - name: bash -n
         run: |
-          for f in build.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
+          for f in build.sh build-overlay.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
                    apple-containers-experiment.sh tests/gateway-test.sh \
                    tests/multiplai-docker-test.sh \
                    git-hooks/dispatch git-hooks/check-hookspath \
@@ -64,7 +64,7 @@ jobs:
       # Dockerfile, so they are exempt.)
       - name: shipped scripts are executable
         run: |
-          for f in build.sh release.sh venv-sync-entrypoint.sh \
+          for f in build.sh build-overlay.sh release.sh venv-sync-entrypoint.sh \
                    container-build-gateway.sh apple-containers-experiment.sh \
                    multiplai-gh-token multiplai-docker.py \
                    tests/gateway-test.sh tests/multiplai-docker-test.sh \
@@ -81,7 +81,7 @@ jobs:
         run: shellcheck --version
       - name: shellcheck
         run: |
-          shellcheck build.sh venv-sync-entrypoint.sh ab md2pdf release.sh \
+          shellcheck build.sh build-overlay.sh venv-sync-entrypoint.sh ab md2pdf release.sh \
                      apple-containers-experiment.sh \
                      git-hooks/dispatch git-hooks/check-hookspath \
                      tests/git-hooks-test.sh tests/gateway-test.sh \

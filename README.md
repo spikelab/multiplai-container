@@ -162,11 +162,46 @@ Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 
 - Ubuntu 24.04, non-root `agent` user mapped to your host UID/GID
 - Claude Code CLI (Node.js 22), `uv` + Python, git, `gh`, ripgrep, jq
-- Google Cloud SDK + Cloud SQL Auth Proxy v2 (for GCP workflows)
 - SSH config for the **macOS host bridge** — skills inside the container can
   run tools that only work on the Mac (Xcode builds, mlx-whisper
   transcription, driving the real Chrome via `ab`) through a key-restricted
   SSH gateway
+
+Project-specific tooling (gcloud, database clients, locales, …) is deliberately
+NOT in this image — add it via an overlay, below.
+
+## Overlay images — project-specific tooling
+
+The base image stays generic; anything one project needs (extra apt packages, a
+cloud CLI, a locale) goes in a small **overlay Dockerfile kept in that
+project's own repo**, built on top of the base with `build-overlay.sh`:
+
+```bash
+./build-overlay.sh --dir path/to/your-project/claude-overlay \
+                   --tag claude-multiplai-myproject:local
+```
+
+The overlay Dockerfile follows this contract:
+
+```dockerfile
+ARG BASE_IMAGE=claude-multiplai:local
+FROM ${BASE_IMAGE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        your-packages-here \
+    && rm -rf /var/lib/apt/lists/*
+USER agent            # the base image runs as agent; switch back
+# ENTRYPOINT/CMD/ENV/WORKDIR are inherited — do not redefine them.
+```
+
+Select the overlay per launch by setting `IMAGE_NAME=<overlay tag>` — with the
+kit, in an `env.<profile>` file, then `./claude.sh --profile <name>`;
+standalone, in `.env` or the `docker run` image argument.
+
+`build-overlay.sh` stamps the base image's ID into the overlay as a label
+(`multiplai.base-image-id`), and the kit's `claude.sh` compares it at launch —
+so when a release rebuilds the base, you get a warning to re-run
+`build-overlay.sh` instead of silently running on the old base.
 
 ## Files
 
@@ -181,6 +216,7 @@ Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 | `VERSION` | Last released version; `release.sh` bumps it and tags `v<VERSION>` |
 | `ab` | Drive Vercel `agent-browser` against the host's real Chrome over the SSH bridge |
 | `apple-containers-experiment.sh` | Experimental: Apple `container` runtime instead of Docker |
+| `build-overlay.sh` | Builds a project overlay image on top of the base, stamping base-image labels for staleness detection |
 | `build.sh` | Builds the image from `.env` config (kit root `.env`, or one next to this script) |
 | `confine.sb` | `sandbox-exec` profile the gateway wraps path-taking commands in — installs to `~/.local/state/multiplai/confine.sb` (data, not a tool), takes the workspace as a `-D` parameter |
 | `container-build-gateway.sh` | Host-side SSH forced-command gateway — allowlists what the container key may run on the Mac, and confines it to the declared workspace |
