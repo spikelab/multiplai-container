@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.12] – 2026-08-17
+
 ### Added
 
 - **Overlay images: project-specific tooling now builds on top of the base
@@ -51,6 +53,8 @@ sandboxed Claude Code container) and predates this changelog.
   repo and build it with `build-overlay.sh`. The kit's `GCP_KEY_FILE` mount
   and `CLOUDSDK_*` env handling are unchanged and work as before once an
   overlay provides the CLI.
+
+[0.12]: https://github.com/spikelab/multiplai-container/compare/v0.11...v0.12
 
 ## [0.11] – 2026-08-17
 
