@@ -207,13 +207,19 @@ USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
         your-packages-here \
     && rm -rf /var/lib/apt/lists/*
-USER agent            # the base image runs as agent; switch back
+# The base image runs as agent — switch back. (Dockerfile comments must sit
+# on their own line; an inline comment becomes part of the instruction.)
+USER agent
 # ENTRYPOINT/CMD/ENV/WORKDIR are inherited — do not redefine them.
 ```
 
 Select the overlay per launch by setting `IMAGE_NAME=<overlay tag>` — with the
 kit, in an `env.<profile>` file, then `./claude.sh --profile <name>`;
-standalone, in `.env` or the `docker run` image argument.
+standalone, as the image argument of your `docker run`. Never point the
+`IMAGE_NAME` in `.env` at an overlay tag: that variable names the tag
+`build.sh` gives the **base** image, so it would rebuild the tool-less base
+under the overlay's name. `build.sh` refuses that collision for registered
+overlays.
 
 `build-overlay.sh` stamps the base image's ID into the overlay as a label
 (`multiplai.base-image-id`), and the kit's `claude.sh` compares it at launch —

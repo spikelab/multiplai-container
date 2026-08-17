@@ -11,7 +11,9 @@
 #   USER root
 #   RUN apt-get update && apt-get install -y --no-install-recommends ... \
 #       && rm -rf /var/lib/apt/lists/*
-#   USER agent            # the base image runs as agent; switch back
+#   # The base image runs as agent — switch back. (Dockerfile comments must
+#   # sit on their own line; an inline comment becomes instruction text.)
+#   USER agent
 #   # ENTRYPOINT/CMD/ENV/WORKDIR are inherited — do not redefine them.
 #
 # The result is selected per launch by claude.sh: set
@@ -38,7 +40,15 @@ BASE_IMAGE="claude-multiplai:local"
 OVERLAY_DIR=""
 TAG=""
 
+# A trailing value-less flag must reach usage, not die on set -u's
+# "unbound variable" — hence the explicit arity check per space-form arm.
 while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir|--tag|--from)
+            if [ $# -lt 2 ]; then
+                echo "Error: $1 requires a value." >&2; usage >&2; exit 1
+            fi ;;
+    esac
     case "$1" in
         --dir)    OVERLAY_DIR="$2"; shift 2 ;;
         --dir=*)  OVERLAY_DIR="${1#--dir=}"; shift ;;
@@ -81,6 +91,31 @@ docker build \
     --label "multiplai.base-image-id=$BASE_ID" \
     -t "$TAG" \
     "$OVERLAY_DIR"
+
+# The labels above assert lineage — verify it instead of trusting the
+# Dockerfile. An overlay whose FROM ignores the BASE_IMAGE arg (hardcoded or
+# digest-pinned) would carry the current base's ID forever, so the staleness
+# check downstream could never fire. Ground truth: the base's RootFS layers
+# must be a prefix of the overlay's.
+BASE_LAYERS=$(docker image inspect -f '{{json .RootFS.Layers}}' "$BASE_IMAGE")
+OVERLAY_LAYERS=$(docker image inspect -f '{{json .RootFS.Layers}}' "$TAG")
+case "$OVERLAY_LAYERS" in
+    "${BASE_LAYERS%]}"*) ;;
+    *)
+        echo "Error: $TAG was not actually built on $BASE_IMAGE." >&2
+        echo "  Its Dockerfile's FROM ignores the BASE_IMAGE build arg — the contract is:" >&2
+        echo "    ARG BASE_IMAGE=claude-multiplai:local" >&2
+        echo "    FROM \${BASE_IMAGE}" >&2
+        exit 1 ;;
+esac
+
+# Not fatal — but a session in this image would run as that user and write
+# mismatched ownership into the bind-mounted workspace.
+FINAL_USER=$(docker image inspect -f '{{.Config.User}}' "$TAG")
+if [ "$FINAL_USER" != "agent" ]; then
+    echo "WARNING: $TAG ends as USER '${FINAL_USER:-root}', not 'agent'." >&2
+    echo "  End the overlay Dockerfile with 'USER agent' (the base image runs as agent)." >&2
+fi
 
 echo "Built $TAG on $BASE_IMAGE ($BASE_ID)"
 echo "Select it per launch: IMAGE_NAME=$TAG in an env.<profile> file (see multiplai-kit docs/PROFILES.md)"

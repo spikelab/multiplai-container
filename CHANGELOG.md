@@ -33,7 +33,13 @@ sandboxed Claude Code container) and predates this changelog.
   an overlay per launch with `IMAGE_NAME=claude-multiplai-<name>:local` in an
   `env.<profile>` file — the launcher already resolves its image default
   after sourcing profiles, so no launcher change is needed. See the README's
-  "Overlay images" section for the Dockerfile contract.
+  "Overlay images" section for the Dockerfile contract. Guards:
+  `build-overlay.sh` verifies the built image really descends from the base
+  (a `FROM` that ignores the `BASE_IMAGE` arg is an error, since its
+  staleness labels would lie forever) and warns when the final `USER` is not
+  `agent`; `build.sh` refuses an `.env` whose `IMAGE_NAME` names a registered
+  overlay's tag, which would rebuild the tool-less base under the overlay's
+  name.
 
 ### Removed
 

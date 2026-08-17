@@ -10,8 +10,8 @@
 # script hands Compose — no daemon involved, by design).
 #
 # What does NOT run, and why:
-#   * `docker build` (the gate release.sh enforces locally). The image pulls the
-#     Google Cloud SDK, Node, uv, bun, pandoc and typst — many minutes per run
+#   * `docker build` (the gate release.sh enforces locally). The image pulls
+#     Node, uv, bun, gitleaks, pandoc and typst — many minutes per run
 #     on a hosted runner for a Dockerfile that changes rarely — and it needs
 #     HOST_UID/HOST_GID/WORKSPACE build args that only make sense on a
 #     developer's machine. `release.sh` refuses to cut a tag unless the build
