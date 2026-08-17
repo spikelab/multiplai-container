@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.11] – 2026-08-17
+
 ### Added
 
 - **The host bridge now confines path-taking commands to your workspace.** It
@@ -181,6 +183,8 @@ sandboxed Claude Code container) and predates this changelog.
   profile at all, so a reader following it end to end hit "no workspace
   declared" with no explanation in the document that produced the state; both
   the block and the file table now cover them.
+
+[0.11]: https://github.com/spikelab/multiplai-container/compare/v0.10...v0.11
 
 ## [0.10] – 2026-08-16
 
