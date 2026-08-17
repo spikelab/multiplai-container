@@ -8,6 +8,23 @@
 ;; which only the host can write — a value from the container would be a
 ;; boundary set by the side being confined.
 ;;
+;; WHAT THIS IS, AND WHAT IT IS NOT
+;;
+;; It is a GUARDRAIL against accidental and stray writes: a build or a
+;; transcription that names the wrong output directory, a tool that defaults to
+;; $HOME, an argument the gateway's argv checks did not anticipate. Against
+;; those it works, and that is the class of failure issue #15 actually
+;; reported (`mlx_whisper --output-dir .` landing in ~).
+;;
+;; It is NOT a boundary against code the container controls. Two grants below
+;; make that plain: `(allow mach-lookup)` is unfiltered, so confined code can
+;; reach launchd and XPC services and have work done on its behalf by an
+;; unconfined process, and `(allow process-exec)` is likewise unrestricted.
+;; That is the standard seatbelt escape, and it matters here specifically
+;; because `swift build` executes package-manifest and plugin code from the
+;; checkout by design (README ▸ macOS host bridge says so). See the note at
+;; the bottom of this file for what filtering would be required.
+;;
 ;; SHAPE OF THE POLICY
 ;;
 ;;   writes   deny by default, allow back under the workspace and the caches a
@@ -21,9 +38,25 @@
 ;;            the browser bridge speaks CDP over loopback.
 ;;   process  exec/fork allowed — a build spawns compilers, linkers, simulators.
 ;;
-;; This file installs through the same `install_host_tool` loop as the gateway,
-;; so a gateway that references it and a profile that lacks a path can never be
-;; separate releases.
+;; HOW IT GETS HERE
+;;
+;; multiplai-kit's setup.sh copies it with `install_host_state` (NOT
+;; `install_host_tool`, which is for executables on $PATH) to
+;; ~/.local/state/multiplai/confine.sb, mode 644, beside the workspace
+;; declaration and the host-browser flag. It is data the gateway reads, not a
+;; tool, and it lives in the one host-owned directory the container cannot
+;; write.
+;;
+;; That copy comes from the kit's PINNED container/ checkout, so this repo must
+;; tag first and the kit's CONTAINER_REF must then be bumped to that tag. A kit
+;; pinned at an older tag finds no source file and installs nothing, silently —
+;; the gateway keeps working with this layer simply absent.
+;;
+;; IF THIS FILE IS WRONG, EVERY BRIDGE COMMAND FAILS. sandbox-exec refuses to
+;; run when it cannot compile the profile. Recovery is one command on the Mac:
+;;   mv ~/.local/state/multiplai/confine.sb ~/.local/state/multiplai/confine.sb.off
+;; The gateway treats a missing profile as "this layer is off" and keeps the
+;; cwd pin and the argv path checks.
 
 (version 1)
 
@@ -41,6 +74,37 @@
 (allow ipc-posix-shm)
 (allow network*)
 (allow file-read*)
+
+;; The operations below are NOT optional extras — `(deny default)` denies every
+;; operation nobody named, and each of these is something an allowlisted
+;; toolchain reaches for. Without them the failure is an opaque sandbox denial
+;; from deep inside a framework, not a message anyone can act on.
+;;
+;;   iokit-open / iokit-get-properties
+;;     Metal. mlx-whisper is MLX on Apple Silicon and initialises a Metal
+;;     device before it does anything else; the Simulator and Xcode's own GPU
+;;     paths need it too. This is the grant whose absence bites first.
+;;   process-info*
+;;     xcodebuild inspects and reaps its children (pidinfo, listpids).
+;;   system-socket
+;;     route and DNS sockets — resolver setup, and anything that asks the
+;;     kernel about the network.
+;;   mach-register
+;;     a process that checks in a service name of its own (test runners,
+;;     simulator helpers) rather than only looking one up.
+;;   file-ioctl
+;;     terminal and device ioctls on files already opened under the rules above.
+;;   pseudo-tty
+;;     tools that allocate a pty for their own output handling.
+;;
+;; All additive, none of them widens the write policy — which is the control
+;; this file exists for.
+(allow iokit-open iokit-get-properties)
+(allow process-info*)
+(allow system-socket)
+(allow mach-register)
+(allow file-ioctl)
+(allow pseudo-tty)
 
 ;; --- writes: the workspace ------------------------------------------------
 
@@ -98,7 +162,9 @@
 
 ;; --- what stays denied, on purpose -----------------------------------------
 ;;
-;; Not listed above, and that is the point:
+;; Not listed above, and that is the point. Read this as "a stray write here is
+;; stopped", not as "a determined process cannot get here" — see the escape
+;; note below.
 ;;   $HOME itself                the reported escape — `--output-dir .` landing
 ;;                               in ~ because the forced command started there
 ;;   ~/.ssh ~/.aws ~/.config     credentials, readable but not writable
@@ -109,3 +175,34 @@
 ;;                               confining it here would be a contradiction —
 ;;                               but nothing ELSE gets to write it.
 ;;   /usr /etc /System /Library  the system
+;;
+;; The gateway also declares that the workspace may be neither `/` nor $HOME:
+;; either value would make `(subpath (param "WORKSPACE"))` above hand back
+;; write access to everything this list claims to deny.
+
+;; --- KNOWN ESCAPE, unfixed, deliberately ------------------------------------
+;;
+;; `(allow mach-lookup)` at the top is unfiltered. A confined process can look
+;; up any Mach service on the machine, including launchd's, and ask an
+;; UNCONFINED process to act for it — the write policy above never sees the
+;; write. `(allow process-exec)` is unrestricted in the same way. This is the
+;; textbook seatbelt escape, not a subtlety of this profile.
+;;
+;; It is left open on purpose. Closing it means
+;;
+;;     (allow mach-lookup (global-name "com.apple.…") …)
+;;
+;; with a complete enumeration of what the Swift/Xcode toolchain, the
+;; Simulator, MLX/Metal and the Hugging Face downloader each need — dozens of
+;; names, several of them version-dependent — and an incomplete list does not
+;; degrade, it breaks the tool outright with an opaque denial. That list cannot
+;; be derived or tested anywhere except on a Mac with the real toolchains
+;; installed, so shipping a guessed one would trade a documented gap for an
+;; undocumented outage.
+;;
+;; To close it, someone with a Mac should: run each allowlisted tool under this
+;; profile with `sandbox-exec` and the sandbox violation log open
+;; (`log stream --predicate 'sender == "Sandbox"'`), collect the global-names
+;; actually requested, and only then replace the bare grant. Until that exists,
+;; the honest description of this file is the one at the top: a guardrail
+;; against stray writes, not a boundary against code the container authored.
