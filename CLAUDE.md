@@ -70,8 +70,16 @@ Every branch therefore sets two flags, both deny-by-default:
   declared workspace. **Leave it at 1 unless the branch can state why no path
   is expressible**, and put that reason in the code. "Probably doesn't write
   anything" is not a reason; "every word is validated against a label charset
-  above" is. The five branches that clear it (`command -v`, `pkill`, `open -a`,
-  `multiplai-gh-token`, `multiplai-docker`, `curl`) each carry theirs.
+  above" is. The six branches that clear it (`command -v`, `pkill`, `open -a`,
+  `multiplai-gh-token`, `multiplai-docker`, `curl`) each carry theirs. The
+  reason has to be reasoned from an **allowlist**, not from a survey of the
+  dangerous options — `curl` cleared the flag on a deny-list of six flags and
+  was wrong about eight others, several of which wrote host files.
+- `NEEDS_WS` also switches on the **path-argument check** after the `cd`, so a
+  new path-taking branch inherits it without doing anything. Absolute
+  arguments, `--flag=/abs`, `SETTING=/abs` and `..` traversals must land inside
+  the workspace or under a read-only system prefix. Cwd pinning does not cover
+  this: it bounds where a command *starts*, not where its arguments *point*.
 - `SANDBOX` — additionally wrap in `sandbox-exec` with `confine.sb`.
 
 **Host-owned state is the trust model, and `$XDG_STATE_HOME` is deliberately not
@@ -82,14 +90,30 @@ neither is a path the remote side could steer — sshd can be configured to acce
 client environment variables.
 
 **`confine.sb` and this script are one release.** The gateway names the profile;
-the kit's `install_host_state` ships it beside the gateway's `install_host_tool`
-for that reason. Never let them travel separately.
+the kit's `install_host_state` copies it to
+`~/.local/state/multiplai/confine.sb` — *not* through `install_host_tool`, which
+is for executables on `$PATH` — beside the workspace declaration and the
+host-browser flag, under the same `CONTAINER_AT_PIN`/`BUILD_OK` gate. Never let
+them travel separately.
+
+**Release ordering, and it is load-bearing.** `install_host_state` copies from
+the kit's *pinned* `container/` checkout, so: tag here **first**, then bump the
+kit's `CONTAINER_REF` to that tag. A kit pinned at an older tag finds no
+`container/confine.sb`, returns without copying, and prints nothing — every host
+then runs with the sandbox layer silently absent while the argv-level checks
+look healthy. That gap is the *normal* state between the two pushes, which is
+why the gateway must never describe a missing profile as a minor degradation.
 
 **What the harness can and cannot tell you.** `tests/gateway-test.sh` covers the
-whole decision — 104 cases including the workspace jail — and runs on Linux
-against a static zsh (`GATEWAY_TEST_ZSH=…`). It cannot tell you whether
+whole decision — 187 cases including the workspace jail, the curl flag
+allowlist and the path-argument check — and runs on Linux against a static zsh
+(`GATEWAY_TEST_ZSH=…`). Its temp tree is rooted under `$HOME` on purpose: the
+path check exempts `/tmp` and `/var/folders`, so a harness living in `mktemp -d`
+could not express an out-of-workspace path at all. It cannot tell you whether
 `sandbox-exec` accepts the profile or whether a given tool still works under it:
-that is macOS-only, and it is a host smoke test, once, per tool.
+that is macOS-only, and it is a host smoke test, once, per tool. **A profile
+sandbox-exec cannot compile fails every bridge command**, so a change to
+`confine.sb` is never done until someone has run one on a Mac.
 
 ## Editing `multiplai-docker.py`
 
