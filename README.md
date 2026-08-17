@@ -179,12 +179,14 @@ top of it — and because sessions run in images, "give Claude a different
 environment" is just "pass a different image name". Keep one overlay per
 project or per kind of task and switch between them per launch:
 
-- a project's full toolchain — its database server and client, compiled-wheel
-  build headers, the locale its code sets at import (the DolceBot overlay
-  carries mysqld + gcloud + `it_IT.UTF-8` so `make test` runs in-session)
-- a cloud CLI you only trust some sessions with (gcloud, aws, kubectl)
-- a data-science stack, an embedded toolchain, a pinned legacy runtime —
-  anything apt/curl can install
+- a **Django or FastAPI project's test stack** — MySQL/PostgreSQL server and
+  client, compiled-wheel build headers, the locale its code sets at import, so
+  `make test` runs entirely in-session
+- a **Node.js stack** pinned to the runtime and package manager a project
+  actually deploys with
+- a **data-science image** — Jupyter, pandas, DuckDB, plotting libraries
+- a **cloud CLI you only trust some sessions with** (gcloud, aws, kubectl), or
+  a pinned legacy runtime — anything apt/curl can install
 
 Each overlay is a small **Dockerfile kept in the consuming project's own repo**
 (versioned with the code that needs it), built on top of the base.
