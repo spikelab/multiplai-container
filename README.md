@@ -5,7 +5,9 @@
 A sandboxed Docker environment for running Claude Code with
 `--dangerously-skip-permissions` safely — the container IS the sandbox.
 Used by [multiplai-kit](https://github.com/spikelab/multiplai-kit), usable
-standalone.
+standalone. [Overlay images](#overlay-images--build-any-environment-for-claude-code)
+build any project- or task-specific environment on top of the generic base —
+your database, your cloud CLI, your locale — selected per launch.
 
 ## Use via multiplai-kit (recommended)
 
@@ -170,11 +172,24 @@ Then set `SSH_BUILD_USER` (your Mac username) and `SSH_BUILD_KEY`
 Project-specific tooling (gcloud, database clients, locales, …) is deliberately
 NOT in this image — add it via an overlay, below.
 
-## Overlay images — project-specific tooling
+## Overlay images — build any environment for Claude Code
 
-The base image stays generic; anything one project needs (extra apt packages, a
-cloud CLI, a locale) goes in a small **overlay Dockerfile kept in that
-project's own repo**, built on top of the base.
+The base image stays generic; an **overlay** builds any environment you want on
+top of it — and because sessions run in images, "give Claude a different
+environment" is just "pass a different image name". Keep one overlay per
+project or per kind of task and switch between them per launch:
+
+- a **Django or FastAPI project's test stack** — MySQL/PostgreSQL server and
+  client, compiled-wheel build headers, the locale its code sets at import, so
+  `make test` runs entirely in-session
+- a **Node.js stack** pinned to the runtime and package manager a project
+  actually deploys with
+- a **data-science image** — Jupyter, pandas, DuckDB, plotting libraries
+- a **cloud CLI you only trust some sessions with** (gcloud, aws, kubectl), or
+  a pinned legacy runtime — anything apt/curl can install
+
+Each overlay is a small **Dockerfile kept in the consuming project's own repo**
+(versioned with the code that needs it), built on top of the base.
 
 Register overlays in `overlays.conf` next to your `.env` (kit root, or this
 directory when standalone) — one `name:path` per line, path absolute,
