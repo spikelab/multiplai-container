@@ -60,10 +60,15 @@
 
 (version 1)
 
-;; Deny by default and report what is denied. `(allow default)` would invert
-;; the whole point of the file.
+;; Deny by default. `(allow default)` would invert the whole point of the file.
+;;
+;; `(with report)` is NOT valid on a deny action — sandbox-exec rejects the
+;; profile with "report modifier does not apply to deny action" and exits 65,
+;; which fails every bridge command closed. Verified on a Mac 2026-08-17.
+;; Denials reach the system log without it; watch them with
+;;   log stream --predicate 'sender == "Sandbox"'
 (deny default)
-(deny file-write* (with report))
+(deny file-write*)
 
 ;; --- what a confined command may do that is not a file write ---------------
 
