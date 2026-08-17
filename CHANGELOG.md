@@ -53,6 +53,15 @@ sandboxed Claude Code container) and predates this changelog.
   for closing it) instead of being papered over. The bridge's trust model is
   unchanged: enable it only for containers running code you trust.
 
+  **Verified on macOS 2026-08-17**, because a profile `sandbox-exec` cannot
+  compile fails every bridge command and the test harness runs on Linux: the
+  profile compiles; `mlx_whisper --help`, `xcodebuild -version`,
+  `swift --version` and `qmd --help` all exit 0 under it (Metal init included);
+  a write inside the workspace succeeds and `touch ~/.sbtest-outside` returns
+  `Operation not permitted` with no file created. The first run of that smoke
+  test found `(deny file-write* (with report))`, which macOS rejects outright —
+  fixed here.
+
   **Install order matters.** The profile is installed by multiplai-kit's
   `install_host_state` from its *pinned* `container/` checkout, so between this
   tag and the kit's `CONTAINER_REF` bump every host runs with the sandbox layer
