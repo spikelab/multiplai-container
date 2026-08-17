@@ -52,21 +52,73 @@ HOST_BROWSER_FLAG="$HOME/.local/state/multiplai/host-browser-enabled"
 # and already installs this gateway.
 WORKSPACE_DECL="$HOME/.local/state/multiplai/workspace"
 
-# The sandbox profile ships from this repo through the same install_host_tool
-# loop as the gateway itself, so it can never be a release out of step with the
-# branch that uses it.
+# The sandbox profile ships from this repo, but NOT through `install_host_tool`
+# — it is data this script reads, not a tool on $PATH. multiplai-kit's setup.sh
+# copies it with a sibling function, `install_host_state`, which lands it at
+# ~/.local/state/multiplai/confine.sb (mode 644) beside the workspace
+# declaration and the host-browser flag: one host-owned directory the container
+# has no route to write. Same verification gate as install_host_tool (the
+# container/ checkout must be verified at CONTAINER_REF and the image build must
+# have passed), so a gateway and a profile from different generations cannot be
+# installed together.
+#
+# RELEASE ORDERING, and it is load-bearing: install_host_state copies from the
+# kit's PINNED container/ checkout. This repo must tag FIRST, then the kit's
+# CONTAINER_REF must be bumped to that tag. A kit still pinned at a tag that
+# predates confine.sb finds no source file, returns without copying, and prints
+# nothing — the sandbox layer then silently never engages while every other
+# layer looks healthy.
 CONFINE_PROFILE="$HOME/.local/state/multiplai/confine.sb"
 
+# The declared workspace, in two forms. WS_RAW is the string the host wrote;
+# WS is that string with symlinks resolved. Everything that ENFORCES uses WS —
+# see the resolution note below.
 WS=""
+WS_RAW=""
 if [ -f "$WORKSPACE_DECL" ]; then
   # One absolute path, first line only. Anything else is a malformed
   # declaration and is treated as no declaration at all — a half-understood
   # boundary is worse than a known-absent one.
-  WS="$(head -n 1 "$WORKSPACE_DECL" 2>/dev/null)"
-  WS="${WS%%$'\r'}"
-  if [[ "$WS" != /* ]] || [[ ! -d "$WS" ]]; then
+  WS_RAW="$(head -n 1 "$WORKSPACE_DECL" 2>/dev/null)"
+  WS_RAW="${WS_RAW%%$'\r'}"
+  if [[ "$WS_RAW" != /* ]] || [[ ! -d "$WS_RAW" ]]; then
     deny "workspace declaration at $WORKSPACE_DECL is not an existing absolute path.
         Re-run ./setup.sh on the Mac to rewrite it."
+  fi
+
+  # Resolve ONCE, here, and use the resolved value for every layer below.
+  #
+  # The two enforcement layers read the workspace differently: the `cd`
+  # containment check compares symlink-RESOLVED paths (pwd -P), while
+  # sandbox-exec matches `(subpath …)` against the kernel's resolved path.
+  # Passing the raw string to one and the resolved string to the other makes
+  # them disagree: declare /Users/you/ws when that is a symlink to
+  # /Volumes/Data/ws and `cd /Users/you/ws && swift build` passes containment
+  # while every write under it is denied by the profile, with no message that
+  # names the cause. (That SBPL subpaths are not resolved for you is why this
+  # profile has to list BOTH /tmp and /private/tmp.)
+  WS="$(cd -P -- "$WS_RAW" 2>/dev/null && pwd -P)" \
+    || deny "declared workspace is unreadable: $WS_RAW"
+
+  # "Absolute and a directory" is not enough. `/` and $HOME both pass that test
+  # while switching the boundary off: `cd` containment then admits everything
+  # the host user can reach, and the profile's `(subpath (param "WORKSPACE"))`
+  # hands back write access to the whole home directory — including ~/.ssh,
+  # which the profile's closing comment claims is denied. A workspace INSIDE
+  # $HOME is the normal case and stays fine; $HOME itself is not a workspace.
+  if [[ "$WS" == "/" ]]; then
+    deny "workspace declaration at $WORKSPACE_DECL is \`/\`, which is not a
+        boundary — it would allow writes anywhere on the host. Declare the
+        directory your projects live in.
+        On the Mac: echo /absolute/path/to/your/workspace > $WORKSPACE_DECL"
+  fi
+  REAL_HOME="$(cd -P -- "$HOME" 2>/dev/null && pwd -P)" || REAL_HOME="$HOME"
+  if [[ "$WS" == "${REAL_HOME%/}" || "$WS_RAW" == "${HOME%/}" ]]; then
+    deny "workspace declaration at $WORKSPACE_DECL is your home directory,
+        which is not a boundary — it re-opens exactly the escape this control
+        exists to close (writes into ~, ~/.ssh, ~/Library). Declare a
+        subdirectory of it instead.
+        On the Mac: echo \$HOME/some/workspace > $WORKSPACE_DECL"
   fi
 fi
 
@@ -145,23 +197,109 @@ if (( XCSIFT )); then
   esac
 fi
 
-# Only URLs to the local host over http/https are allowed for curl; file:// and
-# any non-loopback host are rejected. Applied to every argument, not just one.
+# A URL target must be loopback http/https. This is an ALLOWLIST: anything that
+# is not one of the forms below is refused, including an argument with no scheme
+# at all.
+#
+# It used to return 0 for any argument lacking `://` ("not a URL — nothing to
+# check"), which made it useless as a target test: `curl evil.com` and
+# `--proxy evil.com:8080` both sailed through it, the second giving arbitrary
+# outbound egress from the Mac while the URL itself stayed loopback. The caller
+# is now responsible for calling this only on words that are meant to BE URLs
+# (positional arguments and `--url`), which is what makes the strict form safe.
+#
+# It parses the authority out rather than prefix-matching the whole string,
+# because a prefix match on `http://localhost` is not a host check:
+# `http://localhost:8000@evil.com/` matched the old patterns (the character
+# after `localhost` was a `:`) while curl reads `localhost:8000` as userinfo and
+# connects to evil.com. The host has to be compared as a host.
 url_ok() {
+  local rest auth port
   case "$1" in
-    file:*) return 1 ;;
-    *://*) ;;
-    *) return 0 ;;   # not a URL argument — nothing to check
+    http://*|https://*) rest="${1#*://}" ;;
+    *) return 1 ;;               # no scheme, or a scheme we do not speak
   esac
+  auth="${rest%%[/?#]*}"
+  [[ -n "$auth" ]]      || return 1
+  [[ "$auth" != *@* ]]  || return 1     # no userinfo — see above
+  case "$auth" in
+    localhost|127.0.0.1|\[::1\]) return 0 ;;
+    localhost:*|127.0.0.1:*|\[::1\]:*)
+      port="${auth##*:}"
+      [[ -n "$port" && "${port//[0-9]/}" == "" ]] && return 0
+      return 1 ;;
+  esac
+  return 1
+}
+
+# Value check for the curl flags that take one. The single thing every arm here
+# is guarding is curl's `@file` convention: `-H @f`, `-d @f`, `--data-binary @f`
+# and friends make curl READ a host file, and the bridge returns curl's stdout
+# to the container — the same host-file exfiltration url_ok()'s file: refusal
+# and the agent-browser file: block exist to prevent.
+curl_value_ok() {  # $1 = flag (canonical form), $2 = value
   case "$1" in
-    http://localhost|http://localhost[:/]*|https://localhost|https://localhost[:/]*|\
-    http://127.0.0.1|http://127.0.0.1[:/]*|https://127.0.0.1|https://127.0.0.1[:/]*|\
-    http://\[::1\]|http://\[::1\][:/]*|https://\[::1\]|https://\[::1\][:/]*) return 0 ;;
-    *) return 1 ;;
+    --url)
+      url_ok "$2" ;;
+    # --data-urlencode is the odd one out: its `name@file` spelling puts the @
+    # in the MIDDLE, so a leading-@ test misses it. Refuse @ anywhere.
+    --data-urlencode)
+      [[ "$2" != *@* ]] ;;
+    --header|-H|--data|-d|--data-ascii|--data-binary|--form-string)
+      [[ "$2" != @* ]] ;;
+    # --data-raw is the one -d spelling that does NOT honour @, but keeping the
+    # rule uniform costs nothing and survives someone reshuffling this list.
+    --data-raw)
+      [[ "$2" != @* ]] ;;
+    --user-agent|-A|--referer|-e)
+      [[ "$2" != @* ]] ;;
+    --max-time|-m|--connect-timeout|--retry|--retry-delay|--retry-max-time)
+      [[ -n "$2" && "${2//[0-9.]/}" == "" ]] ;;
+    --request|-X)
+      [[ -n "$2" && "${2//[A-Za-z]/}" == "" ]] ;;
+    --range|-r)
+      [[ -n "$2" && "${2//[0-9,-]/}" == "" ]] ;;
+    *) return 1 ;;   # deny-by-default: an unlisted flag never gets a value
   esac
 }
 
-allow=0
+# --- absolute/traversing path arguments ------------------------------------
+#
+# The command allowlist says nothing about the paths a command is handed.
+# `xcodebuild -derivedDataPath /Users/you/x`, `mlx_whisper --output-dir
+# /Users/you/Desktop x.m4a` and `swift build --scratch-path ../../..` are all
+# outside the workspace, and NONE of them is touched by cwd pinning or by the
+# `cd`-prefix check — those bound where the command STARTS, not where its
+# arguments point. Whenever the sandbox layer is absent (an older kit pin, a
+# profile moved aside) those arguments are the only thing left, and they are
+# unbounded.
+#
+# Reads stay open on purpose (see confine.sb: SDKs, toolchains and model
+# weights all live outside any workspace), so this cannot be a blanket "no
+# absolute path outside the workspace" — that would refuse
+# `-sdk /Applications/Xcode.app/…`. The rule is: an absolute path must be
+# inside the workspace, or under one of the system/toolchain prefixes that are
+# read-only-by-convention and that the profile already treats as fair game.
+path_arg_ok() {  # $1 = candidate path, already lexically absolutised by caller
+  local p="$1"
+  # Inside the workspace, in either spelling. WS is the resolved value; WS_RAW
+  # is what the host declared, and a caller who types the declared (symlinked)
+  # spelling is not attacking anything.
+  [[ "$p" == "$WS" || "$p" == "$WS"/* ]] && return 0
+  [[ -n "$WS_RAW" && ( "$p" == "$WS_RAW" || "$p" == "$WS_RAW"/* ) ]] && return 0
+  case "$p" in
+    # Toolchains and SDKs — read paths a build legitimately names.
+    /Applications/Xcode*.app|/Applications/Xcode*.app/*) return 0 ;;
+    /Library/Developer|/Library/Developer/*) return 0 ;;
+    /usr/*|/bin/*|/sbin/*|/System/*|/Library/Frameworks/*) return 0 ;;
+    /opt/homebrew/*|/opt/local/*) return 0 ;;
+    # Temporary directories the profile already allows writing to.
+    /tmp|/tmp/*|/private/tmp|/private/tmp/*) return 0 ;;
+    /var/folders/*|/private/var/folders/*) return 0 ;;
+    /dev/null|/dev/stdout|/dev/stderr|/dev/fd/*) return 0 ;;
+  esac
+  return 1
+}
 
 # Two per-command properties, both deny-by-default like everything else here.
 #
@@ -236,8 +374,27 @@ case "$c1" in
   # as a path. Requiring a declared workspace for it would break the one probe
   # a session uses to find out whether the bridge works at all.
   command) [[ "$c2" == "-v" ]] && { NEEDS_WS=0; SANDBOX=0; allow=1; } ;;
-  # Two fixed words and an app name matched against `Simulator*`. No path.
-  open)    [[ "$c2" == "-a" && "${words[3]}" == Simulator* ]] && { NEEDS_WS=0; SANDBOX=0; allow=1; } ;;
+  open)
+    # Exactly three words: `open -a` and ONE app name matched literally.
+    #
+    # It used to be a prefix glob (`Simulator*`) with everything from words[4]
+    # on unvalidated, and `open -a` takes a PATH as happily as a registered app
+    # name — so `Simulator/../Evil.app` matched the pattern. With the workspace
+    # bind-mounted read-write into the container, the container could write
+    # $WS/Evil.app and send `cd $WS && open -a Simulator/../Evil.app`: the cd
+    # passes containment, the glob passes, and LaunchServices launches the
+    # bundle OUTSIDE the sandbox (this branch clears both flags). An exact
+    # match is the whole fix — there is no path separator and no `..` to
+    # traverse with. The only caller is the swift-build skill's literal
+    # `open -a Simulator`.
+    if [[ "$c2" == "-a" ]]; then
+      (( ${#words} == 3 )) || deny "open takes exactly \`-a <app>\`: $CMD"
+      case "${words[3]}" in
+        Simulator|Simulator.app) NEEDS_WS=0; SANDBOX=0; allow=1 ;;
+        *) deny "open -a app not allowed: ${words[3]}" ;;
+      esac
+    fi
+    ;;
   pkill)
     # Only allow killing the simulator/build processes this gateway exists for,
     # by exact name — never a bare `pkill -f .` that could reap host processes.
@@ -364,32 +521,108 @@ case "$c1" in
     allow=1
     ;;
   curl)
-    # Loopback-only URLs (checked below) plus a flag allowlist: reject any flag
-    # that could write/read host files or reach a non-URL transport
-    # (-o/-O/--output/-T/--upload-file/--data @file/-K/--config/--unix-socket).
+    # A REAL ALLOWLIST. This used to be a deny-list of six flags with a header
+    # calling itself an allowlist, and the gap was not academic — verified
+    # against curl 8.5.0, with real files created:
+    #
+    #   --stderr <f>        creates/truncates any path
+    #   --libcurl <f>       writes ~1.7 KB including caller-controlled headers
+    #   --etag-save/--hsts/--alt-svc <f>   write
+    #   --remote-name-all   writes the body into $PWD under a SERVER-chosen
+    #                       name (-O was denied; its per-URL twin was not)
+    #   -w @<f>, -b <f>, --etag-compare <f>   READ a host file, and this
+    #                       branch's stdout goes back to the container
+    #   --proxy host:port   arbitrary outbound egress from the Mac while the
+    #                       URL argument itself stays loopback
+    #
+    # Enumerating curl's file-touching flags is a game the gateway loses on the
+    # next curl release. So the rule inverts: name the small set the bridge
+    # actually needs (the only real caller is the host-browser skill's
+    # `curl -s --max-time 5 http://127.0.0.1:9222/json/version`), and refuse
+    # every other flag INCLUDING ones curl has not shipped yet.
+    #
+    # Both spellings are handled — `--flag value` and `--flag=value` — and
+    # clustered short flags (`-sS`) are accepted only when every letter in the
+    # cluster is value-less, so `-so /etc/x` cannot smuggle an -o past the
+    # letter scan.
     seen=0
     i=2
     while (( i <= ${#words} )); do
-      u="${words[i]}"
+      raw="${words[i]}"
+      u="$raw"; val=""; has_val=0
       case "$u" in
-        -o|-O|--output|--output-dir|--create-dirs|-T|--upload-file|\
-        -K|--config|--unix-socket|--abstract-unix-socket|-D|--dump-header|\
-        --trace|--trace-ascii|--cookie-jar|-c)
-          deny "curl flag not allowed: $u" ;;
-        --data*|-d|--data-binary|--data-raw|--data-urlencode)
-          # data may not reference a file (@) or be read from stdin (@-)
-          next="${words[i+1]:-}"
-          [[ "$u" == *=@* || "$next" == @* ]] && deny "curl @file data not allowed"
+        --*=*) val="${u#*=}"; has_val=1; u="${u%%=*}" ;;
+      esac
+      case "$u" in
+        # Long flags that take NO value.
+        --silent|--show-error|--fail|--fail-with-body|--location|--include|\
+        --head|--verbose|--insecure|--compressed|--get|--no-buffer|--globoff|\
+        --ipv4|--ipv6|--http1.1|--http2|--tcp-nodelay|--disable)
+          (( has_val )) && deny "curl flag takes no value: $raw"
+          ;;
+        # Long flags that take a value. curl_value_ok is deny-by-default, so a
+        # flag added here without an arm there is refused rather than waved on.
+        --request|--header|--user-agent|--referer|--max-time|--connect-timeout|\
+        --retry|--retry-delay|--retry-max-time|--range|--form-string|--url|\
+        --data|--data-raw|--data-ascii|--data-binary|--data-urlencode)
+          if (( ! has_val )); then
+            (( i++ ))
+            (( i <= ${#words} )) || deny "curl flag needs a value: $raw"
+            val="${words[i]}"
+          fi
+          curl_value_ok "$u" "$val" || deny "curl value not allowed for $u: $val"
+          # --url IS the target when it is used, so it counts towards `seen`.
+          [[ "$u" == "--url" ]] && seen=1
+          ;;
+        --*) deny "curl flag not allowed: $raw" ;;
+        -?*)
+          rest="${u#-}"
+          while [[ -n "$rest" ]]; do
+            ch="${rest[1]}"; rest="${rest[2,-1]}"
+            case "$ch" in
+              s|S|f|L|i|I|v|k|g|N|G|4|6) ;;          # value-less short flags
+              X|H|A|e|m|d|r)                          # short flags taking a value
+                if [[ -n "$rest" ]]; then
+                  val="$rest"; rest=""                # attached form: -m5
+                else
+                  (( i++ ))
+                  (( i <= ${#words} )) || deny "curl flag needs a value: -$ch"
+                  val="${words[i]}"
+                fi
+                curl_value_ok "-$ch" "$val" \
+                  || deny "curl value not allowed for -$ch: $val"
+                ;;
+              *) deny "curl flag not allowed: -$ch (in $raw)" ;;
+            esac
+          done
+          ;;
+        *)
+          # A non-flag word is a target, and a target must be a loopback URL.
+          url_ok "$u" || deny "curl target not allowed: $u"
+          seen=1
           ;;
       esac
-      url_ok "$u" || deny "curl target not allowed: $u"
-      [[ "$u" == *://* ]] && seen=1
       (( i++ ))
     done
-    # Every flag that could write a file (-o, -O, --output, --output-dir,
-    # --create-dirs, -T, --cookie-jar, -D, --trace*) is denied by the loop
-    # above, and every URL must be loopback. This branch can only write to
-    # stdout, so there is no path for a workspace to bound.
+    # Disable ~/.curlrc, host-side. This is a CONSTANT prepended by the gateway
+    # (same shape as the argv[0] pins above — no client string is re-parsed), and
+    # it has to be the first argument to take effect. Without it the allowlist
+    # above is only half the story: a curlrc line saying `remote-name-all` or
+    # `output = …` reintroduces the file write the allowlist just closed.
+    words=("${words[1]}" "-q" "${(@)words[2,-1]}")
+    # NEEDS_WS=0 is now justified by the allowlist directly above rather than by
+    # a survey of dangerous flags: not one entry in it opens a host file for
+    # reading or writing, every value form is checked by curl_value_ok, and any
+    # unrecognised flag — including a future curl's — is denied. The command can
+    # only write to the stdout it inherits, so there is no path for a workspace
+    # to bound. (The old justification was the same claim reasoned from a
+    # deny-list, which is how it came to be false.)
+    #
+    # SANDBOX=0 follows from the same fact. Setting it would be free
+    # defence-in-depth on paper, but sandbox-exec is macOS-only and untestable
+    # from a container: if the profile refused something curl needs, the failure
+    # would land on the bridge's own reachability probe. Left at 0 deliberately;
+    # revisit only with a host smoke test in hand.
     NEEDS_WS=0
     SANDBOX=0
     (( seen )) && allow=1
@@ -418,29 +651,68 @@ if (( NEEDS_WS )) && [ -z "$WS" ]; then
         multiplai-gh-token, multiplai-docker, curl) keep working without it."
 fi
 
-if [ -n "$WS" ]; then
-  if [ -n "$WORKDIR" ]; then
-    # An explicit `cd` prefix may not leave the workspace. Resolve symlinks
-    # before comparing: a symlink inside the workspace pointing out of it would
-    # otherwise pass a pure string test. `-P` makes cd resolve physically, and
-    # $PWD after it is the real path.
-    real_wd="$(cd -P -- "$WORKDIR" 2>/dev/null && pwd -P)" \
-      || deny "cd failed: $WORKDIR"
-    real_ws="$(cd -P -- "$WS" 2>/dev/null && pwd -P)" \
-      || deny "declared workspace is unreadable: $WS"
-    if [[ "$real_wd" != "$real_ws" && "$real_wd" != "$real_ws"/* ]]; then
-      deny "cd target is outside the declared workspace.
-        requested: $real_wd
-        workspace: $real_ws"
-    fi
-    WORKDIR="$real_wd"
-  elif (( NEEDS_WS )); then
-    # No explicit prefix: pin cwd to the workspace instead of inheriting the
-    # host user's HOME. This alone fixes the escape the issue observed —
-    # `mlx_whisper --output-dir .` resolved to ~ because that is where the
-    # forced command started.
-    WORKDIR="$WS"
+if [ -z "$WORKDIR" ] && [ -n "$WS" ] && (( NEEDS_WS )); then
+  # No explicit prefix: pin cwd to the workspace instead of inheriting the
+  # host user's HOME. This alone fixes the escape the issue observed —
+  # `mlx_whisper --output-dir .` resolved to ~ because that is where the
+  # forced command started.
+  WORKDIR="$WS"
+fi
+
+# CHECK AND USE MUST BE THE SAME cd. This used to probe the directory in a
+# subshell (`$(cd -P … && pwd -P)`), compare the result, and then cd again for
+# real further down. The workspace is bind-mounted READ-WRITE into the
+# container, so between the two calls the container could replace an
+# intermediate directory with a symlink pointing out of the workspace; the
+# second cd resolves at syscall time and lands wherever the link now points.
+# Microseconds wide, infinitely retriable from the container side, and entirely
+# unmitigated whenever the sandbox layer is absent. So: cd -P ONCE, then verify
+# the cwd we are actually standing in.
+if [ -n "$WORKDIR" ]; then
+  cd -P -- "$WORKDIR" 2>/dev/null || deny "cd failed: $WORKDIR"
+  WORKDIR="$(pwd -P)"
+  if [ -n "$WS" ] && [[ "$WORKDIR" != "$WS" && "$WORKDIR" != "$WS"/* ]]; then
+    # An explicit `cd` prefix may not leave the workspace. The comparison is
+    # between two physically-resolved paths, so a symlink inside the workspace
+    # pointing out of it cannot launder the check — and because this reads the
+    # cwd we already hold, nothing can be swapped underneath it afterwards.
+    deny "cd target is outside the declared workspace.
+        requested: $WORKDIR
+        workspace: $WS"
   fi
+fi
+
+# --- path arguments, enforced ----------------------------------------------
+#
+# Runs for exactly the branches that did not clear NEEDS_WS — i.e. the ones
+# that take paths — so a future branch inherits the check by default instead of
+# having to remember it. Candidates are absolute words, `--flag=/abs` and
+# `SETTING=/abs` (xcodebuild build settings), plus anything that traverses with
+# `..`. Traversing candidates are absolutised against the cwd pinned above with
+# zsh's `:a` (lexical: it normalises `..` without needing the path to exist,
+# which matters because most of these are OUTPUT paths).
+if (( NEEDS_WS )) && [ -n "$WS" ]; then
+  i=2
+  while (( i <= ${#words} )); do
+    w="${words[i]}"
+    cand=""
+    case "$w" in
+      /*)                       cand="$w" ;;
+      ..|../*|*/..|*/../*)      cand="$w" ;;
+      *=/*)                     cand="${w#*=}" ;;
+      *=..|*=../*|*=*/..|*=*/../*) cand="${w#*=}" ;;
+    esac
+    if [[ -n "$cand" ]]; then
+      path_arg_ok "${cand:a}" || deny "path argument is outside the declared workspace: $w
+        resolves to: ${cand:a}
+        workspace:   $WS
+        The bridge confines where an allowlisted command may be pointed, not
+        just where it starts. Reads of the system toolchain (/Applications/
+        Xcode*.app, /Library/Developer, /usr, /opt/homebrew) and the temporary
+        directories are still allowed."
+    fi
+    (( i++ ))
+  done
 fi
 
 # Run in a login shell for PATH, but pass argv as data: the inner `exec "$@"`
@@ -452,9 +724,6 @@ fi
 #     .zshrc, so login shells never see it otherwise.
 #   - ~/.bun/bin: bun-installed tools (qmd itself) live there.
 # This widens lookup for allowlisted commands only, not the allowlist.
-if [ -n "$WORKDIR" ]; then
-  cd -- "$WORKDIR" 2>/dev/null || deny "cd failed: $WORKDIR"
-fi
 
 # The jail itself. `sandbox-exec` denies writes by default and allows them back
 # under the declared workspace plus the caches a build genuinely needs; reads
@@ -465,13 +734,25 @@ fi
 # everything it spawns inherits the sandbox — wrapping only the final command
 # would leave a build's child processes outside it.
 #
-# If the profile is not installed, cwd pinning and the WORKDIR containment
-# above still apply; only this layer is missing. That degradation is
-# deliberate: a profile that turns out to be wrong for one tool can be moved
-# aside on the host without losing the boundary that fixes the reported escape,
-# and the host owner can see which state they are in by whether the file
-# exists. It is not a container-reachable switch — same directory, same trust
-# model as the workspace declaration itself.
+# If the profile is not installed, cwd pinning, the WORKDIR containment check
+# and the path-argument check above still apply — but say plainly what is lost,
+# because "only this layer is missing" understates it. Without the profile
+# nothing stops a build's CHILD processes from writing outside the workspace:
+# `swift build` runs manifest and plugin code from the checkout by design
+# (README ▸ macOS host bridge), and the checks above bound only the argv this
+# gateway saw. Treat a missing profile as "the guardrail is off", not "one of
+# three is off".
+#
+# And it is the state that ships FIRST: install_host_state copies the profile
+# from the kit's pinned container/ checkout, so between this repo's tag and the
+# kit's CONTAINER_REF bump every host runs without it. See CONFINE_PROFILE at
+# the top.
+#
+# The degradation is still deliberate: a profile that turns out to be wrong for
+# one tool can be moved aside on the host without losing the argv-level
+# boundary, and the host owner can see which state they are in by whether the
+# file exists. It is not a container-reachable switch — same directory, same
+# trust model as the workspace declaration itself.
 sandbox_prefix=()
 if (( SANDBOX )) && [ -n "$WS" ] && [ -f "$CONFINE_PROFILE" ] \
    && [ -x /usr/bin/sandbox-exec ]; then
