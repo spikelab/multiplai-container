@@ -456,9 +456,8 @@ def run(argv: list[str], capture: bool = False) -> subprocess.CompletedProcess:
         raise Fail("docker not found on PATH", 2)
 
 
-def run_or_die(argv: list[str]) -> int:
-    proc = run(argv)
-    return proc.returncode
+def run_rc(argv: list[str]) -> int:
+    return run(argv).returncode
 
 
 def docker_ps(profile: str | None) -> list[dict]:
@@ -480,7 +479,7 @@ def docker_ps(profile: str | None) -> list[dict]:
         parts = line.split("\t")
         if len(parts) != 6:
             continue
-        cid, prof, project, service, created, status = parts
+        cid, prof, project, service, created, _status = parts
         rows.append(
             {
                 "id": cid,
@@ -488,8 +487,6 @@ def docker_ps(profile: str | None) -> list[dict]:
                 "project": project,
                 "service": service,
                 "created": parse_created(created),
-                "created_raw": created,
-                "status": status,
             }
         )
     return rows
@@ -506,9 +503,8 @@ def parse_created(value: str) -> datetime | None:
         return None
 
 
-def instance_of(row: dict, prefix_by_profile: dict) -> str:
-    prefix = prefix_by_profile.get(row["profile"])
-    project = row["project"]
+def instance_of(profile: str, project: str, prefix_by_profile: dict) -> str:
+    prefix = prefix_by_profile.get(profile)
     if prefix and project.startswith(prefix + "-"):
         return project[len(prefix) + 1 :]
     return project
@@ -704,6 +700,12 @@ def take_instance(args: list[str]) -> str:
     return instance
 
 
+def reject_extra(args: list[str], what: str) -> None:
+    """One spelling for every 'this verb takes nothing more' refusal."""
+    if args:
+        raise Fail("%s: %s" % (what, " ".join(args)))
+
+
 def take_service(conf: dict, args: list[str]) -> str:
     if not args:
         raise Fail("a service name is required")
@@ -748,15 +750,14 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
         base = compose_base(conf, compose_file, project)
 
         if verb == "up":
-            if args:
-                raise Fail("up takes no extra arguments: %s" % " ".join(args))
+            reject_extra(args, "up takes no extra arguments")
             print(
                 "starting %s and waiting for healthchecks (up to %ds).\n"
                 "  first boot runs migrations and can take minutes — this is not a hang.\n"
                 "  watch from another session: multiplai-docker logs %s <service>"
                 % (project, WAIT_TIMEOUT, conf["_name"])
             )
-            rc = run_or_die(
+            rc = run_rc(
                 base + ["up", "-d", "--wait", "--wait-timeout", str(WAIT_TIMEOUT)]
             )
             if rc == 0:
@@ -775,16 +776,14 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
             return rc
 
         if verb == "down":
-            if args:
-                raise Fail("down takes no extra arguments: %s" % " ".join(args))
+            reject_extra(args, "down takes no extra arguments")
             # Always -v: instances are ephemeral, and their named volumes are
             # per-instance (Compose prefixes them with the project name).
-            return run_or_die(base + ["down", "-v"])
+            return run_rc(base + ["down", "-v"])
 
         if verb == "ps":
-            if args:
-                raise Fail("ps takes no extra arguments: %s" % " ".join(args))
-            return run_or_die(base + ["ps"])
+            reject_extra(args, "ps takes no extra arguments")
+            return run_rc(base + ["ps"])
 
         if verb == "logs":
             svc = take_service(conf, args)
@@ -794,32 +793,25 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
                 if not raw.isdigit():
                     raise Fail("logs: <n> must be a number: %s" % raw)
                 tail = min(int(raw), MAX_TAIL)
-            if args:
-                raise Fail("logs takes at most <service> <n>: %s" % " ".join(args))
+            reject_extra(args, "logs takes at most <service> <n>")
             # Never --follow: the bridge call would never return.
-            return run_or_die(
+            return run_rc(
                 base + ["logs", "--no-color", "--tail", str(tail), svc]
             )
 
-        if verb == "restart":
+        if verb in ("restart", "build"):
+            # One body: both take exactly <service>, and the verb IS the
+            # Compose subcommand. build additionally gets no --ssh, --secret,
+            # --allow or --network=host, ever — the guard is that we construct
+            # this argv ourselves and take_instance() has already refused
+            # every caller-supplied flag.
             svc = take_service(conf, args)
-            if args:
-                raise Fail("restart takes only <service>: %s" % " ".join(args))
-            return run_or_die(base + ["restart", svc])
-
-        if verb == "build":
-            svc = take_service(conf, args)
-            if args:
-                raise Fail("build takes only <service>: %s" % " ".join(args))
-            # No --ssh, --secret, --allow or --network=host, ever. The guard is
-            # that we construct this argv ourselves and take_instance() has
-            # already refused every caller-supplied flag.
-            return run_or_die(base + ["build", svc])
+            reject_extra(args, "%s takes only <service>" % verb)
+            return run_rc(base + [verb, svc])
 
         if verb == "exec":
             svc = take_service(conf, args)
-            if args:
-                raise Fail("exec takes only <service> before `--`: %s" % " ".join(args))
+            reject_extra(args, "exec takes only <service> before `--`")
             if not guest:
                 raise Fail("exec needs a command after `--`")
             for word in guest:
@@ -828,7 +820,7 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
                 if not GUEST_ARG_RE.match(word):
                     raise Fail("exec: guest argument not allowed: %s" % word)
             # -T: no TTY, so the argv reaches the guest entrypoint and never Docker.
-            return run_or_die(base + ["exec", "-T", svc] + guest)
+            return run_rc(base + ["exec", "-T", svc] + guest)
 
         raise Fail("unknown verb: %s" % verb)
     finally:
@@ -845,8 +837,7 @@ def cmd_ls(args: list[str]) -> int:
         profile = args.pop(0)
         if not PROFILE_RE.match(profile):
             raise Fail("invalid profile name: %s" % profile)
-    if args:
-        raise Fail("ls takes at most a profile name: %s" % " ".join(args))
+    reject_extra(args, "ls takes at most a profile name")
 
     rows = docker_ps(profile)
     prefixes = prefix_map({r["profile"] for r in rows})
@@ -857,17 +848,12 @@ def cmd_ls(args: list[str]) -> int:
             key,
             {
                 "profile": row["profile"],
-                "instance": instance_of(row, prefixes),
+                "instance": instance_of(row["profile"], row["project"], prefixes),
                 "project": row["project"],
                 "services": [],
-                "created": row["created"],
             },
         )
         entry["services"].append(row["service"] or row["id"])
-        if row["created"] and (
-            entry["created"] is None or row["created"] < entry["created"]
-        ):
-            entry["created"] = row["created"]
 
     if not seen:
         print("no live instances" + (" for profile '%s'" % profile if profile else ""))
@@ -902,8 +888,7 @@ def cmd_reap(args: list[str]) -> int:
     if not args:
         raise Fail("reap-older-than needs <hours>")
     raw = args.pop(0)
-    if args:
-        raise Fail("reap-older-than takes only <hours>: %s" % " ".join(args))
+    reject_extra(args, "reap-older-than takes only <hours>")
     try:
         hours = float(raw)
     except ValueError:
@@ -927,9 +912,7 @@ def cmd_reap(args: list[str]) -> int:
     for (profile, project), created in sorted(newest.items()):
         if created > cutoff:
             continue
-        instance = instance_of(
-            {"profile": profile, "project": project}, prefixes
-        )
+        instance = instance_of(profile, project, prefixes)
         try:
             conf = load_profile(profile)
         except Fail as exc:
@@ -937,7 +920,7 @@ def cmd_reap(args: list[str]) -> int:
             rc = rc or 1
             continue
         print("reaping %s (instance %s, created %s)" % (project, instance, created))
-        code = run_or_die(
+        code = run_rc(
             compose_base(conf, conf["FROZEN"], project) + ["down", "-v"]
         )
         rc = rc or code
@@ -947,8 +930,8 @@ def cmd_reap(args: list[str]) -> int:
 # --------------------------------------------------------------------------
 
 
-def usage(stream=sys.stdout) -> None:
-    print((__doc__ or "").strip(), file=stream)
+def usage() -> None:
+    print((__doc__ or "").strip())
 
 
 def main(argv: list[str]) -> int:

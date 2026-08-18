@@ -330,9 +330,9 @@ case "$c1" in
     if [[ ! -f "$HOST_BROWSER_FLAG" ]]; then
       deny "host browser is not enabled on this host.
         To turn it on, run this on the Mac:
-          mkdir -p ~/.local/state/multiplai
-          touch ~/.local/state/multiplai/host-browser-enabled
-        To turn it off again: rm ~/.local/state/multiplai/host-browser-enabled
+          mkdir -p ${HOST_BROWSER_FLAG:h}
+          touch $HOST_BROWSER_FLAG
+        To turn it off again: rm $HOST_BROWSER_FLAG
         It grants a session the real logged-in Chrome — every cookie and every
         signed-in app on this machine. Nothing in the container can set it."
     fi
@@ -645,8 +645,8 @@ if (( NEEDS_WS )) && [ -z "$WS" ]; then
         On the Mac, run:
           ./setup.sh          (from your multiplai-kit checkout)
         or declare it by hand:
-          mkdir -p ~/.local/state/multiplai
-          echo /absolute/path/to/your/workspace > ~/.local/state/multiplai/workspace
+          mkdir -p ${WORKSPACE_DECL:h}
+          echo /absolute/path/to/your/workspace > $WORKSPACE_DECL
         Commands that take no path (command -v, pkill, open -a Simulator,
         multiplai-gh-token, multiplai-docker, curl) keep working without it."
 fi
@@ -767,11 +767,16 @@ if (( SANDBOX )) && [ -n "$WS" ] && [ -f "$CONFINE_PROFILE" ] \
   )
 fi
 
+# One copy of the PATH prologue for both exec forms below — a host-side
+# constant (never client input), so a PATH fix cannot silently apply to the
+# piped path and not the plain one.
+PATH_PROLOGUE='path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path)'
+
 if (( XCSIFT )); then
   # Trusted, fixed pipeline: the user words run as argv data via "$@"; the
   # xcsift stage is a hardcoded constant (never from client input). pipefail so
   # the build/test exit status wins over xcsift's. Can't use the final `exec`
   # here — a pipeline needs the shell to stay alive to wire both stages.
-  exec "${sandbox_prefix[@]}" zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); set -o pipefail; "$@" 2>&1 | xcsift --format toon --quiet' zsh "${words[@]}"
+  exec "${sandbox_prefix[@]}" zsh -lc "$PATH_PROLOGUE"'; set -o pipefail; "$@" 2>&1 | xcsift --format toon --quiet' zsh "${words[@]}"
 fi
-exec "${sandbox_prefix[@]}" zsh -lc 'path=($HOME/.nvm/versions/node/v24*/bin(N) "$HOME/.bun/bin" $path); exec -- "$@"' zsh "${words[@]}"
+exec "${sandbox_prefix[@]}" zsh -lc "$PATH_PROLOGUE"'; exec -- "$@"' zsh "${words[@]}"

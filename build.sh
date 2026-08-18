@@ -44,51 +44,31 @@ HOST_UID="${HOST_UID:-$(id -u)}"
 HOST_GID="${HOST_GID:-$(id -g)}"
 SSH_BUILD_USER="${SSH_BUILD_USER:-$USER}"
 
-# IMAGE_NAME names the tag this script gives the BASE image. If the .env
-# points it at a registered overlay's tag (a launch-selection value that
-# belongs in an env.<profile> file, not here), the tool-less base would be
-# built UNDER the overlay's name — destroying the overlay image and poisoning
-# the staleness labels of everything built on it. Refuse before building.
-OVERLAYS_CONF="$ENV_DIR/overlays.conf"
-if [ -f "$OVERLAYS_CONF" ]; then
-    while IFS= read -r line || [ -n "$line" ]; do
-        # Trim surrounding whitespace without forking; skip comment lines.
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        case "$line" in ''|\#*) continue ;; esac
-        if [ "claude-multiplai-${line%%:*}:local" = "$IMAGE_NAME" ]; then
-            echo "Error: IMAGE_NAME ($IMAGE_NAME) is the tag of overlay '${line%%:*}' registered in" >&2
-            echo "  $OVERLAYS_CONF. IMAGE_NAME in .env names the base image this script builds;" >&2
-            echo "  select an overlay per launch via IMAGE_NAME in an env.<profile> file instead" >&2
-            echo "  (see multiplai-kit docs/PROFILES.md)." >&2
-            exit 1
-        fi
-    done < "$OVERLAYS_CONF"
-fi
+# The tag an overlay image is built (and selected at launch) under. One
+# formula, used by the collision guard and the build loop below — if the
+# scheme ever changes, both must follow or the guard silently disarms.
+overlay_tag() { printf 'claude-multiplai-%s:local\n' "$1"; }
 
-docker build \
-    --build-arg HOST_UID="$HOST_UID" \
-    --build-arg HOST_GID="$HOST_GID" \
-    --build-arg WORKSPACE="$WORKSPACE" \
-    --build-arg SSH_BUILD_USER="$SSH_BUILD_USER" \
-    -t "$IMAGE_NAME" \
-    "$SCRIPT_DIR"
-
-# --- Overlay images (optional) ---
+# --- overlays.conf: parse and validate ONCE, before building ----------------
 # overlays.conf, next to the .env that configured this build, registers project
 # overlay images as `name:path` lines (path to a directory with an overlay
-# Dockerfile — see build-overlay.sh for the contract). Each entry is rebuilt on
-# top of the base image just built. Docker's layer cache makes an unchanged
-# entry a no-op in seconds, and a changed base or changed overlay Dockerfile
-# busts the cache by itself — so building every entry every time IS the
-# "rebuild only what changed" behaviour, with no state to track.
+# Dockerfile — see build-overlay.sh for the contract). One pass here does the
+# trimming, the name:path split, and the validation, and stores the surviving
+# entries (newline-separated, re-split on the first `:` — names are
+# charset-checked, so they cannot contain one) for the build loop after the
+# base build. A second parser would have to agree with this one on every rule;
+# the two copies this replaces already disagreed on malformed lines.
 #
-# A failing overlay warns but does not fail this script: the base image and
-# everything setup.sh gates on it (the host gateway install) are unaffected by
-# one broken overlay, and claude.sh separately warns at launch when an overlay
-# is left behind on an older base.
+# It also enforces the IMAGE_NAME guard: IMAGE_NAME names the tag this script
+# gives the BASE image. If the .env points it at a registered overlay's tag (a
+# launch-selection value that belongs in an env.<profile> file, not here), the
+# tool-less base would be built UNDER the overlay's name — destroying the
+# overlay image and poisoning the staleness labels of everything built on it.
+# Refuse before building.
+OVERLAYS_CONF="$ENV_DIR/overlays.conf"
+OVERLAY_ENTRIES=""
+OVERLAY_FAILURES=0
 if [ -f "$OVERLAYS_CONF" ]; then
-    OVERLAY_FAILURES=0
     while IFS= read -r line || [ -n "$line" ]; do
         # Trim surrounding whitespace without forking. Comments are whole
         # lines only — stripping from any mid-line `#` would silently
@@ -104,13 +84,20 @@ if [ -f "$OVERLAYS_CONF" ]; then
             continue
         fi
         # Docker repository names must be lowercase, so the tag built from the
-        # name below would be rejected otherwise.
+        # name would be rejected otherwise.
         case "$name" in
             *[!a-z0-9_.-]*)
                 echo "WARNING: skipping overlay with invalid name (allowed: a-z 0-9 _ . -): $name" >&2
                 OVERLAY_FAILURES=$((OVERLAY_FAILURES + 1))
                 continue ;;
         esac
+        if [ "$(overlay_tag "$name")" = "$IMAGE_NAME" ]; then
+            echo "Error: IMAGE_NAME ($IMAGE_NAME) is the tag of overlay '$name' registered in" >&2
+            echo "  $OVERLAYS_CONF. IMAGE_NAME in .env names the base image this script builds;" >&2
+            echo "  select an overlay per launch via IMAGE_NAME in an env.<profile> file instead" >&2
+            echo "  (see multiplai-kit docs/PROFILES.md)." >&2
+            exit 1
+        fi
         # Path: absolute, ~/$HOME-prefixed, or relative to WORKSPACE.
         path="${path/#\~/$HOME}"
         path="${path/#\$HOME/$HOME}"
@@ -118,17 +105,46 @@ if [ -f "$OVERLAYS_CONF" ]; then
             /*) ;;
             *) path="$WORKSPACE/$path" ;;
         esac
-        tag="claude-multiplai-${name}:local"
+        OVERLAY_ENTRIES="$OVERLAY_ENTRIES$name:$path
+"
+    done < "$OVERLAYS_CONF"
+fi
+
+docker build \
+    --build-arg HOST_UID="$HOST_UID" \
+    --build-arg HOST_GID="$HOST_GID" \
+    --build-arg WORKSPACE="$WORKSPACE" \
+    --build-arg SSH_BUILD_USER="$SSH_BUILD_USER" \
+    -t "$IMAGE_NAME" \
+    "$SCRIPT_DIR"
+
+# --- Overlay images (optional) ---
+# Each validated overlays.conf entry (parsed above) is rebuilt on top of the
+# base image just built. Docker's layer cache makes an unchanged entry a no-op
+# in seconds, and a changed base or changed overlay Dockerfile busts the cache
+# by itself — so building every entry every time IS the "rebuild only what
+# changed" behaviour, with no state to track.
+#
+# A failing overlay warns but does not fail this script: the base image and
+# everything setup.sh gates on it (the host gateway install) are unaffected by
+# one broken overlay, and claude.sh separately warns at launch when an overlay
+# is left behind on an older base.
+if [ -n "$OVERLAY_ENTRIES" ]; then
+    while IFS= read -r entry; do
+        [ -n "$entry" ] || continue
+        name="${entry%%:*}"
+        path="${entry#*:}"
+        tag="$(overlay_tag "$name")"
         echo ""
         echo "Building overlay '$name' ($tag) from $path ..."
         if ! "$SCRIPT_DIR/build-overlay.sh" --dir "$path" --tag "$tag" --from "$IMAGE_NAME" </dev/null; then
             echo "WARNING: overlay '$name' failed to build — the base image is unaffected." >&2
             OVERLAY_FAILURES=$((OVERLAY_FAILURES + 1))
         fi
-    done < "$OVERLAYS_CONF"
-    if [ "$OVERLAY_FAILURES" -gt 0 ]; then
-        echo "" >&2
-        echo "WARNING: $OVERLAY_FAILURES overlays.conf entries failed or were skipped (see above)." >&2
-        echo "  Fix and re-run: cd container && ./build.sh" >&2
-    fi
+    done <<<"$OVERLAY_ENTRIES"
+fi
+if [ "$OVERLAY_FAILURES" -gt 0 ]; then
+    echo "" >&2
+    echo "WARNING: $OVERLAY_FAILURES overlays.conf entries failed or were skipped (see above)." >&2
+    echo "  Fix and re-run: cd container && ./build.sh" >&2
 fi

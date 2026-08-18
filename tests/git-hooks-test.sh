@@ -75,9 +75,9 @@ BIN="$TMP/bin"; mkdir -p "$BIN"
 ln -sf "$GITLEAKS_BIN" "$BIN/gitleaks"
 export PATH="$BIN:$PATH"
 
-PASS=0; FAIL=0
-ok()  { PASS=$((PASS+1)); echo "  ok  - $1"; }
-bad() { FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        rc=$RC"; echo "        out=$OUT"; }
+# shellcheck source=tests/harness.sh
+. "$HERE/harness.sh"
+bad() { fail "$1" "rc=$RC" "out=$OUT"; }
 # Explicit if/else rather than `cond && ok || bad`, which shellcheck rightly
 # flags (SC2015): with that form `bad` also runs whenever `ok` itself fails.
 pass_if()  { if [ "$RC" -eq 0 ]; then ok "$1"; else bad "$1"; fi; }   # expect success
@@ -575,6 +575,4 @@ else
     bad "missing ruleset blocks the commit (no silent fallback to defaults)"
 fi
 
-echo
-echo "passed: $PASS  failed: $FAIL"
-[ "$FAIL" -eq 0 ]
+finish git-hooks-test

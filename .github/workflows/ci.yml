@@ -45,7 +45,7 @@ jobs:
         run: |
           for f in build.sh build-overlay.sh release.sh venv-sync-entrypoint.sh ab md2pdf \
                    apple-containers-experiment.sh tests/gateway-test.sh \
-                   tests/multiplai-docker-test.sh \
+                   tests/multiplai-docker-test.sh tests/harness.sh \
                    git-hooks/dispatch git-hooks/check-hookspath \
                    tests/git-hooks-test.sh; do
             echo "== $f"
@@ -85,7 +85,7 @@ jobs:
                      apple-containers-experiment.sh \
                      git-hooks/dispatch git-hooks/check-hookspath \
                      tests/git-hooks-test.sh tests/gateway-test.sh \
-                     tests/multiplai-docker-test.sh
+                     tests/multiplai-docker-test.sh tests/harness.sh
 
   git-hooks-tests:
     name: git hook secret-gate harness
