@@ -503,6 +503,45 @@ else
     bad "a fully covered tree stays silent about the depth bound"
 fi
 
+# The bound and the walk are two numbers that must stay exactly one apart:
+# the walk goes one level past the bound so truncation can be detected, and a
+# repo found in that extra level must be reported as unseen, not scanned. Pin
+# both halves — a repo whose `.git` sits at the bound is reported, one whose
+# `.git` sits a level past it is not, and the note fires either way.
+EDGE="$TMP/edge"
+mkdir -p "$EDGE"
+git init -q "$EDGE/a/b/c/d/e/at-bound"            # its .git is at depth 7
+git -C "$EDGE/a/b/c/d/e/at-bound" config core.hooksPath /somewhere/else
+git init -q "$EDGE/a/b/c/d/e/f/past-bound"        # its .git is at depth 8
+git -C "$EDGE/a/b/c/d/e/f/past-bound" config core.hooksPath /somewhere/else
+OUT="$("$CHECK" "$EDGE" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *at-bound* ]] && [[ "$OUT" != *past-bound* ]] \
+   && [[ "$OUT" == *depth-bounded* ]]; then
+    ok "the depth bound and the truncation walk stay exactly one apart"
+else
+    bad "the depth bound and the truncation walk stay exactly one apart"
+fi
+
+# Root = `/`. Depth is measured by counting path components, and `/` is the
+# one root that does not carry its own component count the way every other
+# path does. Getting it wrong shifts every depth by one, which silences the
+# truncation note and scans a level the bound is meant to exclude. The two
+# fixtures below sit at known depths under `/` (mktemp gives /tmp/tmp.XXXX,
+# two components), so this asserts the arithmetic and not the filesystem.
+SLASH="$(mktemp -d)"                              # /tmp/tmp.XXXX — depth 2
+git init -q "$SLASH/a/b/c/at-bound-slash"         # its .git is at depth 7
+git -C "$SLASH/a/b/c/at-bound-slash" config core.hooksPath /somewhere/else
+git init -q "$SLASH/a/b/c/d/past-bound-slash"     # its .git is at depth 8
+git -C "$SLASH/a/b/c/d/past-bound-slash" config core.hooksPath /somewhere/else
+OUT="$("$CHECK" / 2>&1)"; RC=$?
+rm -rf "$SLASH"
+if [ "$RC" -eq 0 ] && [[ "$OUT" == *at-bound-slash* ]] && [[ "$OUT" != *past-bound-slash* ]] \
+   && [[ "$OUT" == *depth-bounded* ]]; then
+    ok "a root of / measures depth the same as any other root"
+else
+    bad "a root of / measures depth the same as any other root"
+fi
+
 echo "== uncovered repo-local hooks (check-hookspath)"
 
 # hooksPath REPLACES .git/hooks, so a repo-local hook whose name the dispatcher

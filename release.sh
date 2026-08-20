@@ -53,7 +53,7 @@ while [ $# -gt 0 ]; do
     --kit)       KIT_DIR="${2:?--kit needs a path}"; shift ;;
     # The header comment block above, however long it grows: skip the shebang,
     # print until the first non-comment line.
-    -h|--help)   tail -n +2 "$0" | sed -n '/^#/!q;p'; exit 0 ;;
+    -h|--help)   awk 'NR==1 {next} /^#/ {print; next} {exit}' "$0"; exit 0 ;;
     major|minor|patch) BUMP="$1" ;;
     [0-9]*)      BUMP="$1" ;;
     *) echo "release: unknown argument '$1' (see --help)" >&2; exit 2 ;;
@@ -84,7 +84,11 @@ norm_ver() { case "$1" in *.*.0) printf '%s\n' "${1%.0}" ;; *) printf '%s\n' "$1
 rewrite_in_place() {  # <file> <must-contain> <cmd…>
   local file="$1" must="$2" tmp; shift 2
   tmp="$(mktemp)"
-  "$@" > "$tmp"
+  # Checked explicitly: every call site is `rewrite_in_place … || die`, and
+  # `||` suspends `set -e` for this entire body. A generator that emits the
+  # marker and then dies would otherwise pass the check below and truncate
+  # the target to whatever it managed to write.
+  "$@" > "$tmp" || { rm -f "$tmp"; return 1; }
   grep -qF "$must" "$tmp" || { rm -f "$tmp"; return 1; }
   cat "$tmp" > "$file"
   rm -f "$tmp"
@@ -257,10 +261,10 @@ step "Publishing"
 # --atomic: main and the tag land together or not at all — a raced rejection
 # of main can't leave an orphaned public tag behind.
 run git push --atomic --quiet origin main "$TAG"
-say "pushed container main + $TAG"
+$DRY_RUN || say "pushed container main + $TAG"
 if $DO_KIT; then
   run git -C "$KIT_DIR" push --quiet origin HEAD
-  say "pushed kit pin"
+  $DRY_RUN || say "pushed kit pin"
 fi
 
 # ---- done ------------------------------------------------------------------

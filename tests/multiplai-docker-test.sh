@@ -374,7 +374,10 @@ echo "# gateway ↔ tool contract parity"
 # instead of by prose: the two lists must be identical, or a verb exists that
 # one side accepts and the other denies.
 GATEWAY="$HERE/../container-build-gateway.sh"
-gw_verbs="$(grep -oE '[a-z|-]+\|reap-older-than\)' "$GATEWAY" | head -1 | tr -d ')' | tr '|' '\n' | sort)"
+# LC_ALL=C: the Python side sorts by codepoint, and a locale-aware `sort`
+# ignores punctuation in its primary pass — so a verb containing `-` or `_`
+# could yield two orderings of an identical set and a diff pointing at nothing.
+gw_verbs="$(grep -oE '[a-z|-]+\|reap-older-than\)' "$GATEWAY" | head -1 | tr -d ')' | tr '|' '\n' | LC_ALL=C sort)"
 py_verbs="$("$PY" -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("md", sys.argv[1])

@@ -64,7 +64,9 @@ overlay_tag() { printf 'claude-multiplai-%s:local\n' "$1"; }
 # launch-selection value that belongs in an env.<profile> file, not here), the
 # tool-less base would be built UNDER the overlay's name — destroying the
 # overlay image and poisoning the staleness labels of everything built on it.
-# Refuse before building.
+# Refuse before building. The guard is the FIRST thing each line meets, ahead
+# of the validation that `continue`s: an entry too broken to build still names
+# a tag the base build would overwrite. tests/build-test.sh pins that ordering.
 OVERLAYS_CONF="$ENV_DIR/overlays.conf"
 OVERLAY_ENTRIES=""
 OVERLAY_FAILURES=0
@@ -76,6 +78,18 @@ if [ -f "$OVERLAYS_CONF" ]; then
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         case "$line" in ''|\#*) continue ;; esac
+        # The IMAGE_NAME guard runs FIRST, on the raw `${line%%:*}`, before any
+        # validation below can `continue` past it. A malformed or badly-named
+        # entry is unbuildable, but IMAGE_NAME still names the tag it claims —
+        # and that tag is what the base build is about to overwrite. Guarding
+        # after the validation skips leaves exactly those lines unprotected.
+        if [ "$(overlay_tag "${line%%:*}")" = "$IMAGE_NAME" ]; then
+            echo "Error: IMAGE_NAME ($IMAGE_NAME) is the tag of overlay '${line%%:*}' registered in" >&2
+            echo "  $OVERLAYS_CONF. IMAGE_NAME in .env names the base image this script builds;" >&2
+            echo "  select an overlay per launch via IMAGE_NAME in an env.<profile> file instead" >&2
+            echo "  (see multiplai-kit docs/PROFILES.md)." >&2
+            exit 1
+        fi
         name="${line%%:*}"
         path="${line#*:}"
         if [ "$name" = "$line" ] || [ -z "$name" ] || [ -z "$path" ]; then
@@ -91,13 +105,6 @@ if [ -f "$OVERLAYS_CONF" ]; then
                 OVERLAY_FAILURES=$((OVERLAY_FAILURES + 1))
                 continue ;;
         esac
-        if [ "$(overlay_tag "$name")" = "$IMAGE_NAME" ]; then
-            echo "Error: IMAGE_NAME ($IMAGE_NAME) is the tag of overlay '$name' registered in" >&2
-            echo "  $OVERLAYS_CONF. IMAGE_NAME in .env names the base image this script builds;" >&2
-            echo "  select an overlay per launch via IMAGE_NAME in an env.<profile> file instead" >&2
-            echo "  (see multiplai-kit docs/PROFILES.md)." >&2
-            exit 1
-        fi
         # Path: absolute, ~/$HOME-prefixed, or relative to WORKSPACE.
         path="${path/#\~/$HOME}"
         path="${path/#\$HOME/$HOME}"
@@ -109,6 +116,12 @@ if [ -f "$OVERLAYS_CONF" ]; then
 "
     done < "$OVERLAYS_CONF"
 fi
+
+# The Dockerfile uses `COPY --chmod=`, which the classic builder does not
+# understand. BuildKit is the default from Docker 23, but an inherited
+# DOCKER_BUILDKIT=0 (or an older daemon) would fail the build on a directive
+# the image genuinely needs — so ask for it explicitly rather than inheriting.
+export DOCKER_BUILDKIT=1
 
 docker build \
     --build-arg HOST_UID="$HOST_UID" \

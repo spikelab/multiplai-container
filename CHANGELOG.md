@@ -21,26 +21,44 @@ sandboxed Claude Code container) and predates this changelog.
 - **Simplification pass — no behavior changes intended.** Container start gets
   cheaper: the entrypoint's `check-hookspath` scan now walks the workspace
   once instead of twice (the depth-bound truncation probe rides the same
-  `find`), which on a bind-mounted workspace roughly halves the dominant
-  startup traversal cost. `build.sh` parses `overlays.conf` once (the
-  IMAGE_NAME collision guard and the overlay build loop can no longer disagree
-  on what a valid line is, and the overlay tag formula exists in one place).
+  `find`), cutting the dominant startup traversal cost by about 30% on a
+  bind-mounted workspace (0.96s → 0.68s, best of 5 warm runs over a tree of
+  9,423 walked directories; the probe it replaces exited at its first hit, so
+  it never paid for a full second traversal). The depth ceiling is now one
+  constant that the walk and the truncation test both derive from, instead of
+  two numbers that had to be kept exactly one apart by hand.
+  `build.sh` parses `overlays.conf` once (the IMAGE_NAME collision guard and
+  the overlay build loop can no longer disagree on what a valid line is, and
+  the overlay tag formula exists in one place); the guard is the first thing
+  each line meets, so an entry too malformed to build still cannot have its
+  tag overwritten by the base image.
   The Dockerfile copies this repo's own files (`md2pdf`, `git-hooks/*`, the
   entrypoint) *below* every third-party install layer, so editing a hook no
   longer re-downloads the Rust toolchain, and the standalone `chmod +x` layers
-  are folded into `COPY --chmod` (needs BuildKit, the default since Docker 23).
+  are folded into `COPY --chmod`. That directive needs BuildKit (the default
+  since Docker 23), so `build.sh` now asks for it explicitly rather than
+  inheriting whatever `DOCKER_BUILDKIT` the caller had set.
   `release.sh` deduplicates its version normalization and its
   verify-then-`cat >` in-place rewrites (one helper now carries the
-  exec-bit-loss rationale), and `--help` no longer prints past the header.
+  exec-bit-loss rationale, and refuses to write when the generator it ran
+  failed), and `--help` no longer prints past the header.
   The gateway's two `zsh -lc` exec forms share one PATH-prologue constant, and
   its deny messages print the actual `HOST_BROWSER_FLAG`/`WORKSPACE_DECL`
   paths instead of restating them by hand — no allowlist logic touched.
   `multiplai-docker.py` drops write-only row fields and dead `ls` state,
   and spells every "takes no extra arguments" refusal through one helper.
-  The three test harnesses source a shared `tests/harness.sh` for counters
-  and reporting, and a new test asserts the gateway's verb case arm equals
-  `BRIDGE_VERBS` — the two halves of that contract can no longer drift
-  silently.
+
+### Added
+
+- **`tests/build-test.sh` — a stub-docker harness for `build.sh`.** It pins
+  the IMAGE_NAME/overlay collision guard: a `.env` pointing IMAGE_NAME at a
+  registered overlay's tag must refuse *before* any `docker build` runs, for
+  malformed and badly-named `overlays.conf` entries as much as for valid ones.
+  `tests/git-hooks-test.sh` gains matching coverage for `check-hookspath`'s
+  depth bound, including a root of `/`. The three existing harnesses source a
+  shared `tests/harness.sh` for counters and reporting, and a new test asserts
+  the gateway's verb case arm equals `BRIDGE_VERBS` — the two halves of that
+  contract can no longer drift silently.
 
 ## [0.12] – 2026-08-17
 

@@ -800,14 +800,18 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
             )
 
         if verb in ("restart", "build"):
-            # One body: both take exactly <service>, and the verb IS the
-            # Compose subcommand. build additionally gets no --ssh, --secret,
-            # --allow or --network=host, ever — the guard is that we construct
-            # this argv ourselves and take_instance() has already refused
-            # every caller-supplied flag.
+            # One body: both take exactly <service>. The Compose subcommand is
+            # LOOKED UP here rather than forwarded — `verb` arrives over the
+            # bridge, and while the `in` test above pins it to these two
+            # strings today, a lookup keeps this argv built only from literals
+            # in this file even if `verb` is ever normalized on the way in (a
+            # .lower(), an alias map, a prefix match). build additionally gets
+            # no --ssh, --secret, --allow or --network=host, ever — and
+            # take_instance() has already refused every caller-supplied flag.
+            subcommand = {"restart": "restart", "build": "build"}[verb]
             svc = take_service(conf, args)
             reject_extra(args, "%s takes only <service>" % verb)
-            return run_rc(base + [verb, svc])
+            return run_rc(base + [subcommand, svc])
 
         if verb == "exec":
             svc = take_service(conf, args)
