@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.12.1] – 2026-08-20
+
 ### Changed
 
 - **Simplification pass — no behavior changes intended.** Container start gets
@@ -59,6 +61,8 @@ sandboxed Claude Code container) and predates this changelog.
   shared `tests/harness.sh` for counters and reporting, and a new test asserts
   the gateway's verb case arm equals `BRIDGE_VERBS` — the two halves of that
   contract can no longer drift silently.
+
+[0.12.1]: https://github.com/spikelab/multiplai-container/compare/v0.12...v0.12.1
 
 ## [0.12] – 2026-08-17
 
