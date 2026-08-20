@@ -34,6 +34,9 @@ set -uo pipefail
 
 root="${1:-${WORKSPACE:-}}"
 { [ -n "$root" ] && [ -d "$root" ]; } || exit 0
+# The depth arithmetic below counts path components, so the root must not
+# carry a trailing slash.
+[ "$root" = / ] || root="${root%/}"
 
 # The hook names this gate covers are exactly the dispatcher symlinks sitting
 # next to this script. Deriving the set instead of restating it means the
@@ -53,8 +56,49 @@ fi
 hookspath_hits=()
 orphan_hits=()
 seen_hookdirs=" "
+truncated=""
+# The repo bound: `.git` at a greater depth under $root is not scanned. The
+# walk below goes exactly one level past it so awk can tell "nothing deeper
+# exists" from "the bound cut the scan short" — both numbers below derive from
+# this one, so raising the ceiling cannot leave them disagreeing.
+repo_maxdepth=7
+walk_maxdepth=$((repo_maxdepth + 1))
+# Depth is measured as (NF of a path) - base_fields, so base_fields must be
+# the component count of $root itself. `/` splits into two empty fields under
+# -F/ but contributes one, so it cannot use the general formula: with b=2 a
+# child at depth 1 (`/x`, NF=2) would measure as depth 0, putting everything
+# under a root of `/` one level shallower than it is.
+if [ "$root" = / ]; then
+    base_fields=1
+else
+    base_fields=$(printf '%s' "$root" | awk -F/ '{ print NF }')
+fi
 
+# ONE walk of the workspace answers both questions: which repos exist within
+# the depth bound, and did the bound cut the scan short. This runs at every
+# container start on a bind-mounted workspace, where directory traversal is
+# the dominant cost — a second find for the truncation probe would double it.
+#
+# The repo_maxdepth bound is a deliberate cost ceiling, but a scan it cut
+# short must say so — a clean report that is silently incomplete is exactly
+# the kind of quiet gap this script exists to remove. "Cut short" means
+# unseen territory exists: some directory (or worktree/submodule `.git` file)
+# one level past the bound that the repo scan never reached. So find walks to
+# walk_maxdepth with `-type d` emitted too, and awk classifies each line by
+# depth: anything at walk_maxdepth or deeper (relative to the root) means
+# truncation,
+# `.git` hits above the bound feed the repo loop below via a sentinel-free
+# print, and the sentinel line at the end carries the truncation verdict.
+# `.git` is printed-then-pruned so a repo just past the bound counts as
+# unseen without find ever descending into any `.git` (whose objects/
+# fan-out is what the ceiling protects against).
+# NOTE: `-mindepth` is unusable here — GNU find treats it as a global option
+# that would suppress -prune at shallow depths — hence the awk depth filter.
 while IFS= read -r gitpath; do
+    if [ "$gitpath" = "__depth-truncated__" ]; then
+        truncated=y
+        continue
+    fi
     repo="${gitpath%/.git}"
 
     # 1. Local core.hooksPath override. For a worktree/submodule `.git` FILE,
@@ -93,9 +137,14 @@ while IFS= read -r gitpath; do
         orphans="$orphans $name"
     done
     [ -n "$orphans" ] && orphan_hits+=("  $repo  (${orphans# })")
-done < <(find "$root" -maxdepth 7 \
+done < <(find "$root" -maxdepth "$walk_maxdepth" \
             \( -name node_modules -o -name .venv -o -name venv \) -prune \
-            -o -name .git -print -prune 2>/dev/null)
+            -o -name .git -print -prune \
+            -o -type d -print 2>/dev/null \
+        | awk -F/ -v b="$base_fields" -v d="$walk_maxdepth" '
+            NF >= b + d   { deep = 1; next }
+            /\/\.git$/    { print }
+            END           { if (deep) print "__depth-truncated__" }')
 
 if [ "${#hookspath_hits[@]}" -gt 0 ]; then
     printf '%s\n' \
@@ -120,28 +169,10 @@ if [ "${#orphan_hits[@]}" -gt 0 ]; then
         "  Dockerfile, then cutting a release." >&2
 fi
 
-# The -maxdepth 7 above is a deliberate cost ceiling, but a scan it cut short
-# must say so — a clean report that is silently incomplete is exactly the kind
-# of quiet gap this script exists to remove. "Cut short" means unseen
-# territory exists: some directory (or worktree/submodule `.git` file) at
-# depth 8 that the main walk never reached. The probe mirrors the main find's
-# pruning one level deeper; `.git` is printed-then-pruned so a repo just past
-# the bound counts as unseen without the probe ever descending into any
-# `.git` (whose objects/ fan-out is what the ceiling protects against).
-# NOTE: `-mindepth` is unusable here — GNU find treats it as a global option
-# that would suppress -prune at shallow depths — hence the awk depth filter.
-probe_root="${root%/}"
-if [ -n "$probe_root" ]; then
-    base_fields=$(printf '%s' "$probe_root" | awk -F/ '{ print NF }')
-    truncated=$(find "$probe_root" -maxdepth 8 \
-                \( -name node_modules -o -name .venv -o -name venv \) -prune \
-                -o -name .git -print -prune \
-                -o -type d -print 2>/dev/null \
-            | awk -F/ -v b="$base_fields" 'NF >= b + 8 { print "y"; exit }')
-    if [ -n "$truncated" ]; then
-        printf '%s\n' \
-            "secret-scan: note — hookspath scan is depth-bounded (-maxdepth 7); entries deeper than 7 levels under $root were not checked." >&2
-    fi
+# Truncation verdict from the single walk above.
+if [ -n "$truncated" ]; then
+    printf '%s\n' \
+        "secret-scan: note — hookspath scan is depth-bounded; entries deeper than $repo_maxdepth levels under $root were not checked." >&2
 fi
 
 exit 0

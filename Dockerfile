@@ -51,12 +51,6 @@ RUN ARCH=$(dpkg --print-architecture) \
         | tar xJ -C /usr/local/bin --strip-components=1 "typst-${TYPST_ARCH}-unknown-linux-musl/typst" \
     && pandoc --version | head -1 && typst --version
 
-# md2pdf — wrapper encoding the canonical invocation, so sessions don't need
-# to know the --pdf-engine flag (bare `pandoc -o x.pdf` defaults to pdflatex,
-# which is deliberately NOT installed).
-COPY md2pdf /usr/local/bin/md2pdf
-RUN chmod +x /usr/local/bin/md2pdf
-
 # Node.js 22 + GitHub CLI (share one apt-get update/cleanup cycle).
 # Nodesource repo is configured via apt keyring directly (no setup_22.x
 # curl|bash); gnupg is needed once for --dearmor and removed afterwards.
@@ -139,6 +133,47 @@ RUN ARCH=$(dpkg --print-architecture) \
     && chmod +x /usr/local/bin/gitleaks \
     && gitleaks version
 
+# Create agent user with matching host UID/GID.
+# ubuntu:24.04 ships a built-in `ubuntu` user at UID 1000; if HOST_UID collides
+# with an existing user (the default on most Linux hosts), rename that user to
+# `agent` instead of creating one. No `|| true`: a real useradd/usermod failure
+# should fail the build here, not later at the first `USER agent` step.
+RUN set -e; \
+    getent group ${HOST_GID} >/dev/null || groupadd -g ${HOST_GID} hostgroup; \
+    existing="$(getent passwd ${HOST_UID} | cut -d: -f1 || true)"; \
+    if [ -n "$existing" ]; then \
+        usermod -l agent -d /home/agent -m "$existing"; \
+        usermod -g ${HOST_GID} agent; \
+    else \
+        useradd -m -u ${HOST_UID} -g ${HOST_GID} agent; \
+    fi; \
+    id agent
+
+# Pre-create .venv mount point with agent ownership.
+# Docker copies this ownership into new named volumes on first mount.
+# Path MUST match the volume mount in claude.sh: -v "kit-venv:$SCRIPT_DIR/.venv"
+# where SCRIPT_DIR = WORKSPACE/multiplai-runtime. Mismatch → root-owned volume → permission denied.
+RUN mkdir -p ${WORKSPACE}/multiplai-runtime/.venv \
+    && chown ${HOST_UID}:${HOST_GID} ${WORKSPACE}/multiplai-runtime/.venv
+
+# Rust toolchain (installed as agent user → ~/.cargo), version-pinned
+USER agent
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" \
+    && rm -rf /home/agent/.rustup/tmp
+USER root
+
+# --- Files from THIS repo, below every third-party install ------------------
+# These are the files a maintainer actually iterates on, so they sit under all
+# the expensive layers above (apt, npm, the Claude CLI, the rustup toolchain
+# download): editing a hook or the entrypoint rebuilds only from here down,
+# instead of re-downloading the world.
+
+# md2pdf — wrapper encoding the canonical invocation, so sessions don't need
+# to know the --pdf-engine flag (bare `pandoc -o x.pdf` defaults to pdflatex,
+# which is deliberately NOT installed).
+COPY --chmod=755 md2pdf /usr/local/bin/md2pdf
+
 # Container-wide git hooks: scan every commit and every push for secrets.
 #
 # core.hooksPath is set in the SYSTEM config (/etc/gitconfig) rather than the
@@ -184,39 +219,10 @@ RUN chmod 755 /usr/local/share/git-hooks/dispatch /usr/local/share/git-hooks/che
     && git config --system core.hooksPath /usr/local/share/git-hooks \
     && test "$(git config --system --get core.hooksPath)" = /usr/local/share/git-hooks
 
-# Create agent user with matching host UID/GID.
-# ubuntu:24.04 ships a built-in `ubuntu` user at UID 1000; if HOST_UID collides
-# with an existing user (the default on most Linux hosts), rename that user to
-# `agent` instead of creating one. No `|| true`: a real useradd/usermod failure
-# should fail the build here, not later at the first `USER agent` step.
-RUN set -e; \
-    getent group ${HOST_GID} >/dev/null || groupadd -g ${HOST_GID} hostgroup; \
-    existing="$(getent passwd ${HOST_UID} | cut -d: -f1 || true)"; \
-    if [ -n "$existing" ]; then \
-        usermod -l agent -d /home/agent -m "$existing"; \
-        usermod -g ${HOST_GID} agent; \
-    else \
-        useradd -m -u ${HOST_UID} -g ${HOST_GID} agent; \
-    fi; \
-    id agent
-
-# Pre-create .venv mount point with agent ownership.
-# Docker copies this ownership into new named volumes on first mount.
-# Path MUST match the volume mount in claude.sh: -v "kit-venv:$SCRIPT_DIR/.venv"
-# where SCRIPT_DIR = WORKSPACE/multiplai-runtime. Mismatch → root-owned volume → permission denied.
-RUN mkdir -p ${WORKSPACE}/multiplai-runtime/.venv \
-    && chown ${HOST_UID}:${HOST_GID} ${WORKSPACE}/multiplai-runtime/.venv
-
 # Copy entrypoint into image (not dependent on volume mount)
-COPY venv-sync-entrypoint.sh /usr/local/bin/venv-sync-entrypoint.sh
-RUN chmod +x /usr/local/bin/venv-sync-entrypoint.sh
+COPY --chmod=755 venv-sync-entrypoint.sh /usr/local/bin/venv-sync-entrypoint.sh
 
 USER agent
-
-# Rust toolchain (installed as agent user → ~/.cargo), version-pinned
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" \
-    && rm -rf /home/agent/.rustup/tmp
 
 # Pre-seed minimal config to skip onboarding prompts.
 # bypassPermissionsModeAccepted is safe HERE because the container is the sandbox;
@@ -227,8 +233,7 @@ RUN mkdir -p /home/agent/.local/bin /home/agent/.claude && \
 
 # agent-browser bridge wrapper — drives Vercel agent-browser on the macOS host
 # over the SSH build bridge (host gateway allowlists `agent-browser`).
-COPY --chown=${HOST_UID}:${HOST_GID} ab /home/agent/.local/bin/ab
-RUN chmod +x /home/agent/.local/bin/ab
+COPY --chown=${HOST_UID}:${HOST_GID} --chmod=755 ab /home/agent/.local/bin/ab
 
 # SSH setup for host build bridge (Swift/Xcode builds + agent-browser via SSH to
 # macOS host). ControlMaster multiplexes connections so a snapshot->act loop

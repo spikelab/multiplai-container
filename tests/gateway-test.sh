@@ -85,14 +85,14 @@ echo "$WS_DIR" > "$WS_DECL"
 mkdir -p "$WS_DIR/gw test dir" "$WS_DIR/gw (paren) dir" "$WS_DIR/plain"
 mkdir -p "$TMP/outside-ws"
 
-PASS=0; FAIL=0
+# shellcheck source=tests/harness.sh
+. "$HERE/harness.sh"
 run_gw() {  # $1 = SSH_ORIGINAL_COMMAND; sets OUT, ERR, RC
   OUT="$(SSH_ORIGINAL_COMMAND="$1" HOME="$FAKE_HOME" PATH="$STUB:$PATH" \
         "$ZSH_BIN" "$GATEWAY" 2>"$TMP/err")"; RC=$?
   ERR="$(cat "$TMP/err")"
 }
-ok()   { PASS=$((PASS+1)); echo "  ok  - $1"; }
-bad()  { FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        rc=$RC out=$OUT err=$ERR"; }
+bad()  { fail "$1" "rc=$RC out=$OUT err=$ERR"; }
 
 expect_allow() {  # $1 name, $2 cmd, $3 required output substring
   run_gw "$2"
@@ -533,6 +533,4 @@ else
   echo "  skip- sandbox-exec present; wrap is exercised on the host"
 fi
 
-echo
-echo "gateway-test: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ]
+finish gateway-test

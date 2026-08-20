@@ -145,9 +145,9 @@ assert engine["build"]["dockerfile"] == wt + "/app/Dockerfile", engine["build"]
 assert len(named) == 1 and named[0]["source"] == "engine_static", named
 EOF
 
-PASS=0; FAIL=0
-ok()  { PASS=$((PASS+1)); echo "  ok  - $1"; }
-bad() { FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        rc=$RC"; echo "        out=$OUT"; echo "        err=$ERR"; }
+# shellcheck source=tests/harness.sh
+. "$HERE/harness.sh"
+bad() { fail "$1" "rc=$RC" "out=$OUT" "err=$ERR"; }
 
 md() {  # run the tool; sets OUT, ERR, RC
   # TMPDIR is pinned into the sandbox so a test can find (and prove the removal
@@ -174,7 +174,7 @@ argv_is()  { [ "$(last_argv)" = "$1" ]; }
 assert() {  # $1 name, rest: a command whose exit status IS the assertion
   local name="$1"; shift
   if "$@"; then ok "$name"
-  else FAIL=$((FAIL+1)); echo "  FAIL- $name"; echo "        last argv: $(last_argv)"; fi
+  else fail "$name" "last argv: $(last_argv)"; fi
 }
 expect_ok() {   # $1 name, rest: tool argv
   local name="$1"; shift
@@ -188,11 +188,11 @@ expect_fail() { # $1 name, $2 required stderr substring, rest: tool argv
 }
 expect_argv() { # $1 name, $2 expected full argv line
   if [ "$(last_argv)" = "$2" ]; then ok "$1"
-  else FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        want: $2"; echo "        got : $(last_argv)"; fi
+  else fail "$1" "want: $2" "got : $(last_argv)"; fi
 }
 expect_up_argv() { # $1 name, $2 expected full argv line for the compose `up`
   if [ "$(up_argv)" = "$2" ]; then ok "$1"
-  else FAIL=$((FAIL+1)); echo "  FAIL- $1"; echo "        want: $2"; echo "        got : $(up_argv)"; fi
+  else fail "$1" "want: $2" "got : $(up_argv)"; fi
 }
 
 FROZEN="$PROFILES/dolce.json"
@@ -367,6 +367,30 @@ expect_fail "a symlinked profile is refused even when it points inside" "symlink
 rm -f "$PROFILES/inside.conf"
 expect_ok "still fine after the trust checks" up dolce
 
-echo
-echo "multiplai-docker-test: $PASS passed, $FAIL failed"
-[ "$FAIL" -eq 0 ]
+echo "# gateway ↔ tool contract parity"
+# The bridge verb list is ONE contract spelled in two files: BRIDGE_VERBS in
+# the tool, and the verb case arm in the gateway. CLAUDE.md's rule — "widening
+# the verb list means widening the gateway branch too" — is enforced here
+# instead of by prose: the two lists must be identical, or a verb exists that
+# one side accepts and the other denies.
+GATEWAY="$HERE/../container-build-gateway.sh"
+# LC_ALL=C: the Python side sorts by codepoint, and a locale-aware `sort`
+# ignores punctuation in its primary pass — so a verb containing `-` or `_`
+# could yield two orderings of an identical set and a diff pointing at nothing.
+gw_verbs="$(grep -oE '[a-z|-]+\|reap-older-than\)' "$GATEWAY" | head -1 | tr -d ')' | tr '|' '\n' | LC_ALL=C sort)"
+py_verbs="$("$PY" -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("md", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print("\n".join(sorted(mod.BRIDGE_VERBS)))
+' "$TOOL")"
+if [ -n "$gw_verbs" ] && [ "$gw_verbs" = "$py_verbs" ]; then
+  ok "gateway verb case arm matches BRIDGE_VERBS"
+else
+  fail "gateway verb case arm matches BRIDGE_VERBS" \
+    "gateway: $(echo "$gw_verbs" | tr '\n' ' ')" \
+    "tool   : $(echo "$py_verbs" | tr '\n' ' ')"
+fi
+
+finish multiplai-docker-test

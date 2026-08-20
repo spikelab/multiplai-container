@@ -51,7 +51,9 @@ while [ $# -gt 0 ]; do
     --skip-build) SKIP_BUILD=true ;;
     --no-kit)    DO_KIT=false ;;
     --kit)       KIT_DIR="${2:?--kit needs a path}"; shift ;;
-    -h|--help)   sed -n '2,40p' "$0"; exit 0 ;;
+    # The header comment block above, however long it grows: skip the shebang,
+    # print until the first non-comment line.
+    -h|--help)   awk 'NR==1 {next} /^#/ {print; next} {exit}' "$0"; exit 0 ;;
     major|minor|patch) BUMP="$1" ;;
     [0-9]*)      BUMP="$1" ;;
     *) echo "release: unknown argument '$1' (see --help)" >&2; exit 2 ;;
@@ -66,6 +68,31 @@ die()  { printf 'release: %s\n' "$*" >&2; exit 1; }
 # Execute argv directly — arguments are never re-parsed by the shell, so a
 # tag/version containing shell metachars can't inject.
 run()  { if $DRY_RUN; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
+
+# Existing tags are vMAJOR.MINOR; keep a .0 PATCH implicit for a clean tag name
+# and a matching VERSION file (0.5.0 → 0.5). Only strip the trailing .0 when it
+# is the patch component (X.Y.0) — never fold an explicit X.0 down to X, so
+# `./release.sh 1.0` and `./release.sh major` both yield v1.0. One rule for the
+# released tag AND the compare-link tag: normalized differently, the changelog
+# would link a tag that does not exist.
+norm_ver() { case "$1" in *.*.0) printf '%s\n' "${1%.0}" ;; *) printf '%s\n' "$1" ;; esac; }
+
+# Regenerate <file> in place: run <cmd…> into a temp file, require
+# <must-contain> in the result, then `cat >` over the original. Never `mv` from
+# mktemp — that replaces the file with a 0600 temp and silently drops the
+# executable bit (that regression shipped with v0.5, kit commit 6ad8f64).
+rewrite_in_place() {  # <file> <must-contain> <cmd…>
+  local file="$1" must="$2" tmp; shift 2
+  tmp="$(mktemp)"
+  # Checked explicitly: every call site is `rewrite_in_place … || die`, and
+  # `||` suspends `set -e` for this entire body. A generator that emits the
+  # marker and then dies would otherwise pass the check below and truncate
+  # the target to whatever it managed to write.
+  "$@" > "$tmp" || { rm -f "$tmp"; return 1; }
+  grep -qF "$must" "$tmp" || { rm -f "$tmp"; return 1; }
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
 
 # ---- preflight: clean, on main, up to date ---------------------------------
 step "Preflight"
@@ -91,14 +118,7 @@ case "$BUMP" in
   patch) NEW="${MA}.${MI}.$((PA+1))" ;;
   *)     [[ "$BUMP" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || die "bad version '$BUMP'"; NEW="$BUMP" ;;
 esac
-# Existing tags are vMAJOR.MINOR; keep a .0 PATCH implicit for a clean tag name
-# and a matching VERSION file (0.5.0 → 0.5). Only strip the trailing .0 when it
-# is the patch component (X.Y.0) — never fold an explicit X.0 down to X, so
-# `./release.sh 1.0` and `./release.sh major` both yield v1.0.
-case "$NEW" in
-  *.*.0) NORM="${NEW%.0}" ;;
-  *)     NORM="$NEW" ;;
-esac
+NORM="$(norm_ver "$NEW")"
 TAG="v$NORM"
 say "current VERSION=$CUR  →  new=$NORM  →  tag=$TAG"
 git rev-parse -q --verify "refs/tags/$TAG" >/dev/null && die "tag $TAG already exists locally"
@@ -130,21 +150,18 @@ unreleased_body() {
 
 # Rename ## [Unreleased] → ## [$NORM] – <today>, put a fresh empty Unreleased
 # above it, and append the compare link at the end of the released section.
-# Written in place (cat >) to keep the file's inode and mode.
 release_changelog() {
-  local tmp; tmp="$(mktemp)"
-  awk -v ver="$NORM" -v date="$TODAY" -v link="[$NORM]: $COMPARE_URL" '
-    !done && /^## \[Unreleased\]/ {
-      print "## [Unreleased]"; print ""; print "## [" ver "] – " date
-      done=1; inrel=1; next
-    }
-    inrel && /^## / { print link; print ""; inrel=0 }
-    { print }
-    END { if (inrel) { print ""; print link } }
-  ' "$CHANGELOG" > "$tmp"
-  grep -qF "## [$NORM] – $TODAY" "$tmp" || { rm -f "$tmp"; die "changelog rewrite failed — '## [Unreleased]' not renamed"; }
-  cat "$tmp" > "$CHANGELOG"
-  rm -f "$tmp"
+  rewrite_in_place "$CHANGELOG" "## [$NORM] – $TODAY" \
+    awk -v ver="$NORM" -v date="$TODAY" -v link="[$NORM]: $COMPARE_URL" '
+      !done && /^## \[Unreleased\]/ {
+        print "## [Unreleased]"; print ""; print "## [" ver "] – " date
+        done=1; inrel=1; next
+      }
+      inrel && /^## / { print link; print ""; inrel=0 }
+      { print }
+      END { if (inrel) { print ""; print link } }
+    ' "$CHANGELOG" \
+    || die "changelog rewrite failed — '## [Unreleased]' not renamed"
 }
 
 step "Changelog gate"
@@ -154,11 +171,7 @@ grep -q '^## \[Unreleased\]' "$CHANGELOG" || die "$CHANGELOG has no '## [Unrelea
 say "'## [Unreleased]' has notes ($(unreleased_body | wc -l | tr -d ' ') lines)"
 
 # Compare link: previous released tag → this one (normalized the same way).
-case "$CUR" in
-  *.*.0) PREV_NORM="${CUR%.0}" ;;
-  *)     PREV_NORM="$CUR" ;;
-esac
-PREV_TAG="v$PREV_NORM"
+PREV_TAG="v$(norm_ver "$CUR")"
 git rev-parse -q --verify "refs/tags/$PREV_TAG" >/dev/null \
   || PREV_TAG="$(git for-each-ref --sort=-creatordate --format='%(refname:short)' refs/tags | head -1)"
 ORIGIN_URL="$(git remote get-url origin)"
@@ -229,14 +242,9 @@ if $DO_KIT; then
   if $DRY_RUN; then
     say "[dry-run] sed CONTAINER_REF:-<old> → $TAG in $SETUP; commit (push deferred)"
   else
-    tmp="$(mktemp)"
-    sed -E "s#(CONTAINER_REF:-)v[0-9][0-9.]*#\1${TAG}#" "$SETUP" > "$tmp"
-    grep -qF "CONTAINER_REF:-${TAG}}" "$tmp" || { rm -f "$tmp"; die "kit pin rewrite failed — CONTAINER_REF not updated"; }
-    # Write content in place (keeps $SETUP's inode + mode). A `mv` from mktemp
-    # replaced the file with a 0600 temp and silently dropped the executable
-    # bit — that regression shipped with v0.5 (kit commit 6ad8f64).
-    cat "$tmp" > "$SETUP"
-    rm -f "$tmp"
+    rewrite_in_place "$SETUP" "CONTAINER_REF:-${TAG}}" \
+      sed -E "s#(CONTAINER_REF:-)v[0-9][0-9.]*#\1${TAG}#" "$SETUP" \
+      || die "kit pin rewrite failed — CONTAINER_REF not updated"
     [ -x "$SETUP" ] || die "kit setup.sh is not executable after the pin rewrite — restore it (chmod +x, commit) and re-run"
     git -C "$KIT_DIR" add setup.sh
     git -C "$KIT_DIR" commit -q -m "chore(container): pin CONTAINER_REF to $TAG"
@@ -253,14 +261,10 @@ step "Publishing"
 # --atomic: main and the tag land together or not at all — a raced rejection
 # of main can't leave an orphaned public tag behind.
 run git push --atomic --quiet origin main "$TAG"
-say "pushed container main + $TAG"
+$DRY_RUN || say "pushed container main + $TAG"
 if $DO_KIT; then
-  if $DRY_RUN; then
-    say "[dry-run] git -C $KIT_DIR push origin HEAD"
-  else
-    git -C "$KIT_DIR" push --quiet origin HEAD
-    say "pushed kit pin"
-  fi
+  run git -C "$KIT_DIR" push --quiet origin HEAD
+  $DRY_RUN || say "pushed kit pin"
 fi
 
 # ---- done ------------------------------------------------------------------
