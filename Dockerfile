@@ -79,18 +79,25 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
     && cp /root/.bun/bin/bunx /usr/local/bin/bunx \
     && rm -rf /root/.bun
 
-# Vite + ccusage + LSP servers + ast-grep globally (all version-pinned), clean
-# npm cache.
+# Vite + pnpm + ccusage + LSP servers + ast-grep globally (all version-pinned),
+# clean npm cache.
 #
-# ast-grep is the structural-search tier the image was missing. An audit of
-# 111,780 real tool calls found zero symbol-level lookups: 100% of code
-# navigation was lexical grep, and the "grep for a name, then Read the whole
-# file to see the definition" loop is why the Read tool accounts for 72% of
-# every byte of tool output that reaches a context window. The LSP servers
-# below cover Python and TypeScript only; ast-grep is language-agnostic
-# (Swift, Go, Rust, shell) and composes with pipes, which is what the agent
-# actually reaches for.
-RUN npm install -g vite@8.1.3 ccusage@20.0.14 @usebruno/cli@3.5.1 \
+# pnpm is here rather than in a project overlay because it is a package
+# manager, not project tooling: a repo with a pnpm-lock.yaml cannot be
+# installed by npm at all, so without it the agent's first move in such a repo
+# fails. Corepack ships with Node 22 and is deliberately left unused: it
+# fetches pnpm from the network on first use, at whatever version the repo
+# names, with no pin of ours in the way. An explicit npm -g install is the
+# pinned, offline-safe path.
+#
+# The pin is the newest 11.x line release; 12.x is not adopted yet. Move it
+# forward, never backwards to match a consuming repo: pnpm honours a
+# project's package.json "packageManager" field and downloads that version
+# itself (verified: pnpm 11.23.0 reports 10.10.0 inside a repo declaring it),
+# so what runs in a pinned repo is the repo's choice either way. This pin only
+# governs repos that declare nothing, and those should get a current pnpm.
+# Requires Node >= 22.13.
+RUN npm install -g vite@8.1.3 pnpm@11.26.0 ccusage@20.0.14 @usebruno/cli@3.5.1 \
         pyright@1.1.411 typescript-language-server@5.3.0 typescript@6.0.3 \
     && npm cache clean --force
 

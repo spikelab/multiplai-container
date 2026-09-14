@@ -16,6 +16,24 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **pnpm 11.26.0 in the base image**, alongside the existing global npm tier
+  (vite, ccusage, bruno, the LSP servers). A repo carrying a `pnpm-lock.yaml`
+  cannot be installed by npm at all, so an agent dropped into one previously
+  had no working package manager and no way to add one. A package manager
+  belongs in the base, not in each consuming project's overlay. Corepack, which
+  Node 22 already ships, stays unused on purpose: it fetches pnpm over the
+  network on first use, at whatever version the repo names, so it is neither
+  pinned nor offline-safe.
+
+  The pin is the newest 11.x release; 12.x is not adopted yet. Move it forward,
+  never backwards to match a consuming repo. An older pin would not buy
+  compatibility anyway: pnpm obeys a project's `packageManager` field and
+  fetches that version itself, so a repo declaring 10.x gets 10.x regardless of
+  what the image ships. This pin governs repos that declare nothing. Needs
+  Node >= 22.13, which the image already has.
+
 ## [0.12.1] – 2026-08-20
 
 ### Changed
