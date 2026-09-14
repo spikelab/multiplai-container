@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.13] – 2026-09-14
+
 ### Added
 
 - **pnpm 11.26.0 in the base image**, alongside the existing global npm tier
@@ -33,6 +35,8 @@ sandboxed Claude Code container) and predates this changelog.
   fetches that version itself, so a repo declaring 10.x gets 10.x regardless of
   what the image ships. This pin governs repos that declare nothing. Needs
   Node >= 22.13, which the image already has.
+
+[0.13]: https://github.com/spikelab/multiplai-container/compare/v0.12.1...v0.13
 
 ## [0.12.1] – 2026-08-20
 
