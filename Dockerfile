@@ -79,8 +79,29 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
     && cp /root/.bun/bin/bunx /usr/local/bin/bunx \
     && rm -rf /root/.bun
 
-# Vite + ccusage + LSP servers + ast-grep globally (all version-pinned), clean
-# npm cache.
+# Vite + pnpm + ccusage + LSP servers + ast-grep globally (all version-pinned),
+# clean npm cache.
+#
+# pnpm is here rather than in a project overlay because it is a package
+# manager, not project tooling: a repo with a pnpm-lock.yaml cannot be
+# installed by npm at all, so without it the agent's first move in such a repo
+# fails. Corepack ships with Node 22 and is deliberately left disabled — it
+# caches its shims under a root-owned COREPACK_HOME written at build time,
+# which the agent user cannot read, so the first pnpm call of every session
+# would re-download pnpm over the network.
+#
+# Track the current release, and do not pin backwards to match a consuming
+# repo. pnpm 10.x carries 23 GitHub advisories (11 HIGH) that a *cloned repo*
+# can reach — GHSA-w466-c33r-3gjp lets a project env lockfile short-circuit
+# package-manager resolution and execute lockfile-selected pnpm bytes, and
+# GHSA-3qhv-2rgh-x77r lets repo config expand this container's environment
+# secrets into registry requests before any script runs. Untrusted repos are
+# this image's normal input, so an old pnpm is an exposed attack surface, not
+# a compatibility convenience. Matching a repo's pin would not even buy
+# compatibility: pnpm honours a project's package.json "packageManager" field
+# and downloads that version itself (verified — pnpm 11.23.0 reports 10.10.0
+# inside a repo declaring it), so what runs there is the repo's choice either
+# way. This pin governs repos that declare nothing. Requires Node >= 22.13.
 #
 # ast-grep is the structural-search tier the image was missing. An audit of
 # 111,780 real tool calls found zero symbol-level lookups: 100% of code
@@ -90,7 +111,7 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
 # below cover Python and TypeScript only; ast-grep is language-agnostic
 # (Swift, Go, Rust, shell) and composes with pipes, which is what the agent
 # actually reaches for.
-RUN npm install -g vite@8.1.3 ccusage@20.0.14 @usebruno/cli@3.5.1 \
+RUN npm install -g vite@8.1.3 pnpm@11.23.0 ccusage@20.0.14 @usebruno/cli@3.5.1 \
         pyright@1.1.411 typescript-language-server@5.3.0 typescript@6.0.3 \
     && npm cache clean --force
 
