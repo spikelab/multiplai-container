@@ -47,7 +47,7 @@ jobs:
                    apple-containers-experiment.sh tests/gateway-test.sh \
                    tests/multiplai-docker-test.sh tests/build-test.sh tests/harness.sh \
                    git-hooks/dispatch git-hooks/check-hookspath \
-                   tests/git-hooks-test.sh; do
+                   tests/git-hooks-test.sh tests/dockerfile-test.sh; do
             echo "== $f"
             bash -n "$f"
           done
@@ -68,7 +68,8 @@ jobs:
                    container-build-gateway.sh apple-containers-experiment.sh \
                    multiplai-gh-token multiplai-docker.py \
                    tests/gateway-test.sh tests/multiplai-docker-test.sh \
-                   tests/build-test.sh tests/git-hooks-test.sh; do
+                   tests/build-test.sh tests/git-hooks-test.sh \
+                   tests/dockerfile-test.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
 
@@ -85,7 +86,8 @@ jobs:
                      apple-containers-experiment.sh \
                      git-hooks/dispatch git-hooks/check-hookspath \
                      tests/git-hooks-test.sh tests/gateway-test.sh \
-                     tests/multiplai-docker-test.sh tests/build-test.sh tests/harness.sh
+                     tests/multiplai-docker-test.sh tests/build-test.sh tests/harness.sh \
+                     tests/dockerfile-test.sh
 
   git-hooks-tests:
     name: git hook secret-gate harness
@@ -141,3 +143,13 @@ jobs:
       # what is under test is build.sh's refusal to build, not a real build.
       - name: tests/build-test.sh
         run: ./tests/build-test.sh
+
+  dockerfile-tests:
+    name: Dockerfile static assertions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Static greps only — the build itself is release.sh's gate. This pins
+      # that the in-build Playwright smoke check is still there to run.
+      - name: tests/dockerfile-test.sh
+        run: ./tests/dockerfile-test.sh
