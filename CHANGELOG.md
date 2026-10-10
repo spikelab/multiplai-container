@@ -29,7 +29,7 @@ sandboxed Claude Code container) and predates this changelog.
   libraries come from `playwright install --with-deps`, Playwright's own list
   for the platform, not a hand-kept one. The build launches both browsers as
   an unprivileged user and fails if either cannot render a page. The layer
-  adds about 800 MB unpacked.
+  adds 819 MB.
 
   The global `playwright` package is `require()`-able anywhere through
   `NODE_PATH=/usr/lib/node_modules`. **Consumers must pin the same version**
