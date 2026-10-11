@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.14] – 2026-10-11
+
 ### Added
 
 - **Playwright 1.63.0 and its Chromium builds in the base image**
@@ -38,6 +40,8 @@ sandboxed Claude Code container) and predates this changelog.
   against, so any other version finds no browser and tries to download one.
   `/dev/shm` needs no `--shm-size`: Playwright passes
   `--disable-dev-shm-usage` on every Chromium launch.
+
+[0.14]: https://github.com/spikelab/multiplai-container/compare/v0.13...v0.14
 
 ## [0.13] – 2026-09-14
 
