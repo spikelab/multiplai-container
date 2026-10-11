@@ -23,6 +23,11 @@ ARG GITLEAKS_VERSION=8.29.0
 # GITLEAKS_SHA256_X64 out of this file for its own install.
 ARG GITLEAKS_SHA256_X64=39e07ad810336fd0ae80d0bd61c60d0521f628173e7583583b5df4a38738522c
 ARG GITLEAKS_SHA256_ARM64=4c811a7c23296c7163ebab166ec67cd8a31eb9922caf06a7cac4d6dd872e4159
+# Consumers must pin the SAME version (e.g. `playwright==1.63.0` in the
+# video-edit skill's pyproject.toml): each Playwright release looks only for
+# the browser revision it was built against, so a mismatch makes it ask for a
+# revision this image does not have, and launch() fails until it downloads one.
+ARG PLAYWRIGHT_VERSION=1.63.0
 
 # --- All apt packages in one layer, single cache cleanup ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -109,6 +114,67 @@ RUN npm install -g vite@8.1.3 pnpm@11.26.0 ccusage@20.0.14 @usebruno/cli@3.5.1 \
 RUN npm install -g --prefix /opt/ast-grep @ast-grep/cli@0.45.1 \
     && ln -s /opt/ast-grep/bin/ast-grep /usr/local/bin/ast-grep \
     && npm cache clean --force
+
+# Playwright + its Chromium builds, so a session can render HTML, take
+# screenshots and run browser tests locally instead of driving the Mac's
+# browser over the SSH bridge (`ab` keeps that job for real websites).
+# Chromium only: no Firefox, no WebKit.
+#
+# The browsers are baked in rather than fetched on first use because $HOME is
+# not persisted between sessions — a download into ~/.cache/ms-playwright
+# would be repeated, and lost, every session. PLAYWRIGHT_BROWSERS_PATH is set
+# as ENV (not inline) so this install and every later Node or Python
+# Playwright process read the one path. NODE_PATH makes the global install
+# require()-able outside a project; a project's own node_modules still wins.
+#
+# System libraries come from `install --with-deps`, which apt-installs the
+# list Playwright itself keeps per platform (ubuntu24.04-arm64 and -x64 are
+# both in 1.63.0's table), so there is no hand-written package list here to
+# drift from the browser revision. It runs `apt-get update` itself but leaves
+# the lists behind, hence the cleanup in this same RUN. DEBIAN_FRONTEND keeps
+# a tzdata-style debconf prompt from hanging the build.
+#
+# /dev/shm: claude.sh passes no --shm-size. Docker's documented default is
+# 64 MB, though an OrbStack session measured 7.9 GB (2026-10-10). Neither
+# matters: Playwright launches Chromium with --disable-dev-shm-usage
+# unconditionally (chromiumSwitches in
+# packages/playwright-core/src/server/chromium/chromiumSwitches.ts, bundled
+# into playwright-core/lib/coreBundle.js:34867 in 1.63.0, and spread into
+# every launch's arguments at coreBundle.js:43336), so Chromium writes its
+# shared memory to /tmp instead.
+#
+# The directory is group-owned by HOST_GID with setgid directories, so a
+# session (agent's primary group) can add another revision for its own
+# lifetime if it needs one. The smoke check launches both builds as an
+# unprivileged user (nobody, via setpriv — the agent user does not exist
+# yet), so a missing library or a root-only permission fails the build here
+# instead of in a session.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+ENV NODE_PATH=/usr/lib/node_modules
+RUN npm install -g "playwright@${PLAYWRIGHT_VERSION}" \
+    && DEBIAN_FRONTEND=noninteractive \
+       playwright install --with-deps chromium chromium-headless-shell \
+    && chgrp -R ${HOST_GID} /opt/ms-playwright \
+    && chmod -R a+rX,g+w /opt/ms-playwright \
+    && find /opt/ms-playwright -type d -exec chmod g+s {} + \
+    && rm -rf /var/lib/apt/lists/* /root/.cache /root/.npm /tmp/* \
+    && npm cache clean --force \
+    && playwright --version \
+    && HOME=/tmp setpriv --reuid=65534 --regid=65534 --clear-groups \
+       node -e ' \
+         const { chromium } = require("playwright"); \
+         (async () => { \
+           for (const opts of [{}, { channel: "chromium" }]) { \
+             const browser = await chromium.launch(opts); \
+             const page = await browser.newPage(); \
+             await page.goto("data:text/html,<p>ok</p>"); \
+             const text = await page.textContent("p"); \
+             if (text !== "ok") throw new Error("smoke check read " + text); \
+             console.log("playwright smoke ok:", opts.channel || "chromium-headless-shell", browser.version()); \
+             await browser.close(); \
+           } \
+         })().catch((e) => { console.error(e); process.exit(1); });' \
+    && rm -rf /tmp/*
 
 # Claude Code — install.sh takes the version as its argument, so CLAUDE_VERSION
 # both pins the installed CLI and busts this layer's cache when bumped.

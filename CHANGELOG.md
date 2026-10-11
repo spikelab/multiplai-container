@@ -16,6 +16,29 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **Playwright 1.63.0 and its Chromium builds in the base image**
+  (`chromium` and `chromium-headless-shell`, revision 1243, Chromium
+  153.0.8010.12), installed to `PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright`.
+  A session can now render HTML, take screenshots and run browser tests
+  locally. Until now the only browser was the Mac's, driven over the SSH
+  bridge with `ab`, which costs two round trips per action; `ab` keeps that
+  job for real websites. The browsers are baked in because `$HOME` is not
+  persisted, so a first-use download would repeat every session. The system
+  libraries come from `playwright install --with-deps`, Playwright's own list
+  for the platform, not a hand-kept one. The build launches both browsers as
+  an unprivileged user and fails if either cannot render a page. The layer
+  adds 819 MB.
+
+  The global `playwright` package is `require()`-able anywhere through
+  `NODE_PATH=/usr/lib/node_modules`. **Consumers must pin the same version**
+  (`playwright==1.63.0` for Python, `playwright@1.63.0` for Node): a
+  Playwright release looks only for the browser revision it was built
+  against, so any other version finds no browser and tries to download one.
+  `/dev/shm` needs no `--shm-size`: Playwright passes
+  `--disable-dev-shm-usage` on every Chromium launch.
+
 ## [0.13] – 2026-09-14
 
 ### Added
