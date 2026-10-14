@@ -129,6 +129,129 @@ if [ -d "$CLI_DIR" ]; then
     fi
 fi
 
+# --- pi and Codex CLI auto-update (persistent, survives container restarts) ---
+# Same scheme as the Claude block above, for the other two agent CLIs. The
+# image bakes a pinned copy of each (/usr/local/bin/pi, /usr/local/bin/codex);
+# when the launcher mounts the folder below, a self-updating copy is kept
+# there with the vendor's own installer and put first on PATH. No mount →
+# baked copy, no install attempts.
+#
+#   pi     ~/.pi-cli/agent/bin/pi   pi.dev/install.sh once, then `pi update`
+#   Codex  ~/.codex/bin/codex       chatgpt.com/codex/install.sh each time
+#
+# A refresh is skipped while its .last-update stamp is younger than
+# MULTIPLAI_CLI_UPDATE_DAYS (default 7), and serialised across containers
+# sharing the mount by a mkdir lock, .update-lock. A lock older than 30
+# minutes is left by a container killed mid-update: it is removed and the
+# refresh runs (each installer cleans its own staging). A younger one means
+# another container is updating right now: this one neither waits nor
+# retries, and uses whichever copy is already there.
+#
+# Each installer runs with PATH=<its bin dir>:/usr/bin:/bin. Leaving out
+# /usr/local/bin hides the baked copies: pi's installer refuses to install
+# while a pi it does not manage is on PATH, and offers to npm-uninstall it.
+# Putting the bin dir first keeps both installers out of the rest of $HOME:
+# pi's links itself from ~/.local/bin when that comes first on PATH, and
+# Codex's appends a PATH block to ~/.bashrc when its bin dir is missing.
+# pi also runs under `setsid -w`, with no controlling terminal: otherwise
+# its installer opens /dev/tty, which a `docker run -it` session has, and
+# waits at an interactive menu (pi.dev/install.sh, read 2026-10-14).
+#
+# Nothing here may stop the container from starting. A failure prints one
+# [entrypoint] line naming the copy still in use, writes no stamp, and the
+# next start retries.
+CLI_INSTALLER_PATH="/usr/bin:/bin"
+CLI_LOCK_STALE_MINUTES=30
+CLI_LOCK_HELD=""
+
+# cli_version <command> — the version `<command> --version` reports, without
+# a program name in front (`codex-cli 0.159.2` → 0.159.2).
+cli_version() {
+    local v=""
+    v="$("$1" --version 2>/dev/null | awk 'NR == 1 { print $NF }')" || true
+    echo "${v:-unknown}"
+}
+
+pi_install() {  # $1 = ~/.pi-cli
+    curl -fsSL https://pi.dev/install.sh \
+        | setsid -w env PATH="$1/agent/bin:$CLI_INSTALLER_PATH" PI_CODING_AGENT_DIR="$1/agent" sh
+}
+
+pi_update() {  # $1 = ~/.pi-cli
+    setsid -w env PATH="$1/agent/bin:$CLI_INSTALLER_PATH" PI_CODING_AGENT_DIR="$1/agent" \
+        "$1/agent/bin/pi" update </dev/null
+}
+
+codex_install() {  # $1 = ~/.codex — installs, or updates an existing install
+    curl -fsSL https://chatgpt.com/codex/install.sh \
+        | env PATH="$1/bin:$CLI_INSTALLER_PATH" CODEX_HOME="$1" CODEX_INSTALL_DIR="$1/bin" \
+              CODEX_NON_INTERACTIVE=1 sh
+}
+
+# refresh_cli <name> <dir> <bin> <install-fn> <update-fn> — install <bin> if
+# it is missing, update it if its stamp is older than the interval, under the
+# folder's lock. Never fails.
+refresh_cli() {
+    local name="$1" dir="$2" bin="$3" install_fn="$4" update_fn="$5"
+    local days="${MULTIPLAI_CLI_UPDATE_DAYS:-7}"
+    local stamp="$dir/.last-update" lock="$dir/.update-lock"
+    local verb fn copy
+
+    if [ -x "$bin" ]; then
+        if [ -f "$stamp" ] && find "$stamp" -mtime -"$days" 2>/dev/null | grep -q .; then
+            return 0
+        fi
+        verb=update; fn="$update_fn"
+    else
+        verb=install; fn="$install_fn"
+    fi
+
+    if find "$lock" -maxdepth 0 -mmin +"$CLI_LOCK_STALE_MINUTES" 2>/dev/null | grep -q .; then
+        rmdir "$lock" 2>/dev/null || true
+    fi
+    if ! mkdir "$lock" 2>/dev/null; then
+        if [ -x "$bin" ]; then copy="installed $name"; else copy="baked $name"; fi
+        echo "[entrypoint] $name $verb in progress elsewhere — using $copy"
+        return 0
+    fi
+    CLI_LOCK_HELD="$lock"
+    trap 'rmdir "$CLI_LOCK_HELD" 2>/dev/null || true' EXIT
+
+    if [ "$verb" = install ]; then
+        echo "[entrypoint] Installing $name ..."
+    else
+        echo "[entrypoint] Updating $name (every ${days}d) ..."
+    fi
+    if "$fn" "$dir" >/dev/null 2>&1 && [ -x "$bin" ]; then
+        date > "$stamp" 2>/dev/null || true
+        echo "[entrypoint] $name: $(cli_version "$bin")"
+    elif [ -x "$bin" ]; then
+        echo "[entrypoint] $name $verb failed (offline?) — using installed $name $(cli_version "$bin")"
+    else
+        echo "[entrypoint] $name $verb failed (offline?) — using baked $name $(cli_version "$name")"
+    fi
+
+    rmdir "$lock" 2>/dev/null || true
+    trap - EXIT
+    CLI_LOCK_HELD=""
+}
+
+PI_CLI_DIR="$HOME/.pi-cli"
+if [ -d "$PI_CLI_DIR" ]; then
+    refresh_cli pi "$PI_CLI_DIR" "$PI_CLI_DIR/agent/bin/pi" pi_install pi_update
+    if [ -x "$PI_CLI_DIR/agent/bin/pi" ]; then
+        export PATH="$PI_CLI_DIR/agent/bin:$PATH"
+    fi
+fi
+
+CODEX_DIR="$HOME/.codex"
+if [ -d "$CODEX_DIR" ]; then
+    refresh_cli codex "$CODEX_DIR" "$CODEX_DIR/bin/codex" codex_install codex_install
+    if [ -x "$CODEX_DIR/bin/codex" ]; then
+        export PATH="$CODEX_DIR/bin:$PATH"
+    fi
+fi
+
 # --- Secret-gate drift warning (never blocks) ---
 # The image gates every repo via core.hooksPath in /etc/gitconfig, but a
 # repo-local core.hooksPath (husky/lefthook-style) outranks system config and

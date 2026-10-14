@@ -92,6 +92,7 @@ if [ -n "$existing" ] && [ "$existing" != "$agent/bin/pi" ]; then
     exit 1
 fi
 [ "${STUB_PI_INSTALL_FAIL:-0}" = 1 ] && exit 1
+[ "${STUB_PI_INSTALL_NOOP:-0}" = 1 ] && exit 0
 root="$agent/install"
 rm -rf "$root/staging"
 mkdir -p "$root/staging"
@@ -350,6 +351,8 @@ expect "a stamp younger than the interval: both copies still first on PATH" \
 
 H="$(new_home forced pi)"
 run_ep "$TMP/forced1.out" "$H"
+# GNU find counts a stamp written in the same second as matching -mtime -0.
+age 5 "$H/.pi-cli/.last-update"
 run_ep "$TMP/forced2.out" "$H" MULTIPLAI_CLI_UPDATE_DAYS=0
 expect_lines "MULTIPLAI_CLI_UPDATE_DAYS=0 forces the update" "$TMP/forced2.out" \
     "[entrypoint] Updating pi (every 0d) ..." "[entrypoint] pi: 1.3.0"
@@ -399,6 +402,13 @@ run_ep "$TMP/s2b.out" "$H" STUB_PI_INSTALL_FAIL=1
 expect_lines "S2: an installer that exits non-zero online is the same failure" "$TMP/s2b.out" \
     "[entrypoint] Installing pi ..." \
     "[entrypoint] pi install failed (offline?) — using baked pi 1.2.0"
+
+H="$(new_home s2c pi)"
+run_ep "$TMP/s2c.out" "$H" STUB_PI_INSTALL_NOOP=1
+expect_lines "S2: an installer that exits 0 but leaves no launcher is the same failure" "$TMP/s2c.out" \
+    "[entrypoint] Installing pi ..." \
+    "[entrypoint] pi install failed (offline?) — using baked pi 1.2.0"
+expect "S2: no stamp without a launcher" test ! -e "$H/.pi-cli/.last-update"
 
 # --- S3: weekly pi update killed mid-update ---------------------------------
 
