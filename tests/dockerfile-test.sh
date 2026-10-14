@@ -93,8 +93,26 @@ expect_line "PI_VERSION is a pinned ARG" \
     '^ARG PI_VERSION=[0-9]+\.[0-9]+\.[0-9]+$'
 expect_line "CODEX_VERSION is a pinned ARG" \
     '^ARG CODEX_VERSION=[0-9]+\.[0-9]+\.[0-9]+$'
-expect_line "the pi layer installs the pinned version with npm" \
-    '^RUN .*npm install -g .*@earendil-works/pi-coding-agent@\$\{PI_VERSION\}'
+
+# The baked pi must stay off /usr/bin. The entrypoint runs pi's installer with
+# PATH=<bin dir>:/usr/bin:/bin, and the installer refuses to install while a pi
+# it does not manage is on PATH: a pi at npm's default prefix (/usr/bin) would
+# make every install fail. So pi gets its own prefix, /opt/pi, and only the
+# /usr/local/bin/pi link exposes it — in the one RUN that installs it.
+PI_LAYER="$(grep -E '^RUN .*pi-coding-agent' <<<"$INSTRUCTIONS")"
+count="$(grep -c . <<<"$PI_LAYER")"
+if [ "$count" -eq 1 ]; then
+    ok "exactly one RUN installs pi"
+else
+    fail "exactly one RUN installs pi" "found $count"
+fi
+expect_pi_layer() {  # expect_pi_layer <name> <ERE> — the pi layer matches.
+    if grep -Eq -- "$2" <<<"$PI_LAYER"; then ok "$1"; else fail "$1" "pi layer does not match: $2"; fi
+}
+expect_pi_layer "the pi layer installs the pinned version under the /opt/pi prefix" \
+    'npm install -g --prefix /opt/pi "?@earendil-works/pi-coding-agent@\$\{PI_VERSION\}"?( |$)'
+expect_pi_layer "the pi layer links /usr/local/bin/pi to /opt/pi/bin/pi" \
+    '&& ln -s /opt/pi/bin/pi /usr/local/bin/pi( |$)'
 expect_line "the Codex layer pins its release to CODEX_VERSION" \
     '^RUN .*CODEX_RELEASE="?\$\{CODEX_VERSION\}'
 expect_line "the Codex layer installs non-interactively" \
