@@ -53,6 +53,16 @@ cat > "$STUBS/curl" <<'EOF'
 for url in "$@"; do :; done
 echo "curl $url" >> "$STUB_LOG"
 [ "${STUB_OFFLINE:-0}" = 1 ] && exit 6
+if [ "${STUB_CURL_STALL:-0}" = 1 ]; then
+    # A network that accepts the connection and then sends nothing. Real curl
+    # gives up (exit 28) only when given both a connect and a total time
+    # limit; without them it waits, so this stub waits too.
+    case " $* " in
+        *" --connect-timeout "*) case " $* " in *" --max-time "*) exit 28 ;; esac ;;
+    esac
+    sleep 20
+    exit 28
+fi
 case "$url" in
     https://pi.dev/install.sh) cat "$STUB_DIR/pi-install.sh" ;;
     https://chatgpt.com/codex/install.sh) cat "$STUB_DIR/codex-install.sh" ;;
@@ -72,16 +82,20 @@ EOF
 
 # hold — shared by the installer stubs. With STUB_HOLD=1 the stub records its
 # pid and blocks until the harness creates $STUB_DIR/release (or kills it):
-# that is the "mid-download" moment the stop cases interrupt.
+# that is the moment the stop cases interrupt. The caller sets HOLD_POINT;
+# the stub holds only where it equals STUB_HOLD_AT (default: download).
 cat > "$STUB_DIR/hold.sh" <<'EOF'
-if [ "${STUB_HOLD:-0}" = 1 ]; then
+if [ "${STUB_HOLD:-0}" = 1 ] && [ "${STUB_HOLD_AT:-download}" = "$HOLD_POINT" ]; then
     echo $$ > "$STUB_DIR/hold.pid"
     n=0
     while [ ! -e "$STUB_DIR/release" ] && [ "$n" -lt 600 ]; do sleep 0.1; n=$((n+1)); done
 fi
 EOF
 
-# pi.dev/install.sh, reduced to what the entrypoint relies on.
+# pi.dev/install.sh, reduced to what the entrypoint relies on. Like the real
+# run_managed_install_pi, it writes the launcher before current-version, so a
+# kill between the two (STUB_HOLD_AT=launcher) leaves a launcher that cannot
+# run.
 cat > "$STUB_DIR/pi-install.sh" <<'EOF'
 set -eu
 agent="${PI_CODING_AGENT_DIR:?PI_CODING_AGENT_DIR not set}"
@@ -97,13 +111,14 @@ root="$agent/install"
 rm -rf "$root/staging"
 mkdir -p "$root/staging"
 echo partial > "$root/staging/download.part"
-. "$STUB_DIR/hold.sh"
+HOLD_POINT=download; . "$STUB_DIR/hold.sh"
 mkdir -p "$root/releases/$STUB_PI_LATEST"
 rm -f "$root/staging/download.part"
-printf '%s\n' "$STUB_PI_LATEST" > "$root/current-version"
 mkdir -p "$agent/bin"
 cp "$STUB_DIR/pi-launcher.sh" "$agent/bin/pi"
 chmod 755 "$agent/bin/pi"
+HOLD_POINT=launcher; . "$STUB_DIR/hold.sh"
+printf '%s\n' "$STUB_PI_LATEST" > "$root/current-version"
 # The real installer links pi from the first of these dirs it finds on PATH.
 IFS=:
 for d in $PATH; do
@@ -120,6 +135,11 @@ cat > "$STUB_DIR/pi-launcher.sh" <<'EOF'
 set -eu
 agent="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd -P)"
 root="$agent/install"
+# The real launcher reads current-version before it does anything else.
+if [ ! -r "$root/current-version" ]; then
+    echo "Could not read managed Pi version from $root/current-version." >&2
+    exit 1
+fi
 case "${1:-}" in
     --version) cat "$root/current-version" ;;
     update)
@@ -133,7 +153,7 @@ case "${1:-}" in
         rm -rf "$root/update" "$root/staging"
         mkdir -p "$root/staging" "$root/update"
         echo partial > "$root/staging/download.part"
-        . "$STUB_DIR/hold.sh"
+        HOLD_POINT=download; . "$STUB_DIR/hold.sh"
         mkdir -p "$root/releases/$STUB_PI_LATEST"
         rm -f "$root/staging/download.part"
         printf '%s\n' "$STUB_PI_LATEST" > "$root/current-version"
@@ -161,7 +181,7 @@ fi
 mkdir "$lock"
 find "$root/releases" -mindepth 1 -maxdepth 1 -name '.staging.*' -exec rm -rf {} +
 mkdir -p "$root/releases/.staging.1"
-. "$STUB_DIR/hold.sh"
+HOLD_POINT=download; . "$STUB_DIR/hold.sh"
 rmdir "$root/releases/.staging.1"
 rel="$root/releases/$STUB_CODEX_LATEST-stub"
 mkdir -p "$rel/bin"
@@ -382,6 +402,25 @@ age 31 "$H/.pi-cli/.update-lock"
 run_ep "$TMP/s1.out" "$H"
 expect_same "S1 lock older than 30 min: resume matches a clean install" "$H" "$TMP/s1.out" "$TMP/BASE_PI_INSTALL"
 
+echo "== S1 pi first install killed after the launcher, before current-version"
+# pi.dev/install.sh writes the launcher, then current-version. A kill between
+# the two leaves a launcher that exits 1 on every command, `pi update`
+# included: the copy is not installed, and the resume is the installer again.
+H="$(new_home s1l pi)"
+kill_mid_step "$H" STUB_HOLD_AT=launcher
+expect "S1 launcher: the kill leaves the launcher" test -x "$H/.pi-cli/agent/bin/pi"
+expect "S1 launcher: the kill leaves no current-version" \
+    test ! -e "$H/.pi-cli/agent/install/current-version"
+run_ep "$TMP/s1l-young.out" "$H"
+expect_lines "S1 launcher, lock younger than 30 min: skip, baked pi" "$TMP/s1l-young.out" \
+    "[entrypoint] pi install in progress elsewhere — using baked pi"
+expect "S1 launcher, lock younger than 30 min: the baked pi runs, not the broken launcher" \
+    has_line "$TMP/s1l-young.out" "pi=$BAKED/pi 1.2.0"
+age 31 "$H/.pi-cli/.update-lock"
+run_ep "$TMP/s1l.out" "$H"
+expect_same "S1 launcher, lock older than 30 min: resume matches a clean install" \
+    "$H" "$TMP/s1l.out" "$TMP/BASE_PI_INSTALL"
+
 # --- S2: pi first install fails (offline) -----------------------------------
 
 echo "== S2 pi first install fails"
@@ -457,6 +496,23 @@ age 31 "$H/.codex/.update-lock" "$H/.codex/packages/standalone/install.lock.d"
 run_ep "$TMP/s5.out" "$H"
 expect_same "S5 locks older than 30 min: resume matches a clean install" "$H" "$TMP/s5.out" "$TMP/BASE_CODEX_INSTALL"
 
+echo "== S5 codex weekly update killed"
+H="$(new_home s5u codex)"
+seed_old "$H" codex
+kill_mid_step "$H"
+expect "S5 update: the kill leaves our lock" test -d "$H/.codex/.update-lock"
+expect "S5 update: the kill leaves Codex's own lock" \
+    test -d "$H/.codex/packages/standalone/install.lock.d"
+run_ep "$TMP/s5u-young.out" "$H"
+expect_lines "S5 update, lock younger than 30 min: skip, installed codex" "$TMP/s5u-young.out" \
+    "[entrypoint] codex update in progress elsewhere — using installed codex"
+expect "S5 update: the old binary runs meanwhile" \
+    has_line "$TMP/s5u-young.out" "codex=$H/.codex/bin/codex codex-cli 0.160.0"
+age 31 "$H/.codex/.update-lock" "$H/.codex/packages/standalone/install.lock.d"
+run_ep "$TMP/s5u.out" "$H"
+expect_same "S5 update, locks older than 30 min: resume matches a clean update" \
+    "$H" "$TMP/s5u.out" "$TMP/BASE_CODEX_UPDATE"
+
 # --- S6: Codex install or update fails --------------------------------------
 
 echo "== S6 codex install or update fails"
@@ -502,7 +558,7 @@ s7_pair() {
     expect_lines "$name: the second container skips" "$TMP/$name-b.out" "$want"
     expect "$name: the second container does not wait (${elapsed}s)" test "$elapsed" -le 2
     expect "$name: only the first container ran the installer" \
-        test "$(( $(calls pi-installer) + $(calls pi-update) ))" -eq 1
+        test "$(( $(calls pi-installer) + $(calls pi-update) + $(calls codex-installer) ))" -eq 1
 }
 
 H="$(new_home s7 pi)"
@@ -519,6 +575,21 @@ expect "S7 update: the second container runs the existing launcher" \
     has_line "$TMP/S7 update-b.out" "pi=$H/.pi-cli/agent/bin/pi 1.2.0"
 expect_same "S7 update: the first container matches a clean update" \
     "$H" "$TMP/S7 update-a.out" "$TMP/BASE_PI_UPDATE"
+
+H="$(new_home s7c codex)"
+s7_pair "S7 codex first install" "$H" "[entrypoint] codex install in progress elsewhere — using baked codex"
+expect "S7 codex first install: the second container runs the baked codex" \
+    has_line "$TMP/S7 codex first install-b.out" "codex=$BAKED/codex codex-cli 0.159.2"
+expect_same "S7 codex first install: the first container matches a clean install" \
+    "$H" "$TMP/S7 codex first install-a.out" "$TMP/BASE_CODEX_INSTALL"
+
+H="$(new_home s7cu codex)"
+seed_old "$H" codex
+s7_pair "S7 codex update" "$H" "[entrypoint] codex update in progress elsewhere — using installed codex"
+expect "S7 codex update: the second container runs the existing binary" \
+    has_line "$TMP/S7 codex update-b.out" "codex=$H/.codex/bin/codex codex-cli 0.160.0"
+expect_same "S7 codex update: the first container matches a clean update" \
+    "$H" "$TMP/S7 codex update-a.out" "$TMP/BASE_CODEX_UPDATE"
 
 # --- S9: the same step stopped twice in a row ---------------------------------
 
@@ -540,5 +611,72 @@ kill_mid_step "$H"
 age 31 "$H/.pi-cli/.update-lock"
 run_ep "$TMP/s9u.out" "$H"
 expect_same "S9: resume after two stopped updates matches a clean update" "$H" "$TMP/s9u.out" "$TMP/BASE_PI_UPDATE"
+
+H="$(new_home s9c codex)"
+kill_mid_step "$H"
+age 31 "$H/.codex/.update-lock" "$H/.codex/packages/standalone/install.lock.d"
+kill_mid_step "$H"
+age 31 "$H/.codex/.update-lock" "$H/.codex/packages/standalone/install.lock.d"
+run_ep "$TMP/s9c.out" "$H"
+expect_same "S9: resume after two stopped codex installs matches a clean install" \
+    "$H" "$TMP/s9c.out" "$TMP/BASE_CODEX_INSTALL"
+
+H="$(new_home s9cu codex)"
+seed_old "$H" codex
+kill_mid_step "$H"
+age 31 "$H/.codex/.update-lock" "$H/.codex/packages/standalone/install.lock.d"
+kill_mid_step "$H"
+age 31 "$H/.codex/.update-lock" "$H/.codex/packages/standalone/install.lock.d"
+run_ep "$TMP/s9cu.out" "$H"
+expect_same "S9: resume after two stopped codex updates matches a clean update" \
+    "$H" "$TMP/s9cu.out" "$TMP/BASE_CODEX_UPDATE"
+
+# --- failures that must not hold up the start ---------------------------------
+
+echo "== a download that stalls"
+# The container start must not wait on a network that never answers: the
+# entrypoint gives curl its own time limits, so the start fails over to the
+# baked copies well inside this harness's 15 s limit.
+H="$(new_home stall pi codex)"
+start=$SECONDS
+timeout -k 1 15 bash -c 'out="$1"; shift; "$@" bash "$0" bash -c "$PROBE" > "$out" 2>&1' \
+    "$SRC" "$TMP/stall.out" env -i HOME="$H" PATH="$STUBS:$BAKED:/usr/bin:/bin" \
+    STUB_DIR="$STUB_DIR" STUB_LOG="$STUB_LOG" PROBE="$PROBE" \
+    STUB_PI_LATEST=1.3.0 STUB_CODEX_LATEST=0.170.0 STUB_CURL_STALL=1
+rc=$?
+expect "a stalled download does not hold up the start (rc=$rc, $((SECONDS - start))s)" test "$rc" -eq 0
+expect_lines "a stalled download: one failure line per tool, naming the baked copy" "$TMP/stall.out" \
+    "[entrypoint] Installing pi ..." \
+    "[entrypoint] pi install failed (offline?) — using baked pi 1.2.0" \
+    "[entrypoint] Installing codex ..." \
+    "[entrypoint] codex install failed (offline?) — using baked codex 0.159.2"
+
+echo "== a mounted folder that is not writable"
+# Docker creates a missing bind-mount source as root, so uid 501 cannot write
+# to it. That must not be reported as another container holding the lock.
+if [ "$(id -u)" -eq 0 ]; then
+    echo "  skip - running as root, which can write to a mode-555 folder"
+else
+    H="$(new_home ro pi codex)"
+    chmod 555 "$H/.pi-cli" "$H/.codex"
+    reset_log
+    run_ep "$TMP/ro.out" "$H"
+    expect_lines "a folder that is not writable: one line each, naming why and the baked copy" "$TMP/ro.out" \
+        "[entrypoint] $H/.pi-cli is not writable — using baked pi 1.2.0" \
+        "[entrypoint] $H/.codex is not writable — using baked codex 0.159.2"
+    expect "a folder that is not writable: no installer runs" test ! -s "$STUB_LOG"
+    expect "a folder that is not writable: the baked pi runs" has_line "$TMP/ro.out" "pi=$BAKED/pi 1.2.0"
+    chmod 755 "$H/.pi-cli" "$H/.codex"
+
+    H="$(new_home ro-old pi)"
+    seed_old "$H" pi
+    chmod 555 "$H/.pi-cli"
+    run_ep "$TMP/ro-old.out" "$H"
+    expect_lines "a folder that is not writable, with an installed copy: that copy is named" "$TMP/ro-old.out" \
+        "[entrypoint] $H/.pi-cli is not writable — using installed pi 1.2.0"
+    expect "a folder that is not writable, with an installed copy: it stays first on PATH" \
+        has_line "$TMP/ro-old.out" "pi=$H/.pi-cli/agent/bin/pi 1.2.0"
+    chmod 755 "$H/.pi-cli"
+fi
 
 finish entrypoint-test
