@@ -47,7 +47,8 @@ jobs:
                    apple-containers-experiment.sh tests/gateway-test.sh \
                    tests/multiplai-docker-test.sh tests/build-test.sh tests/harness.sh \
                    git-hooks/dispatch git-hooks/check-hookspath \
-                   tests/git-hooks-test.sh tests/dockerfile-test.sh; do
+                   tests/git-hooks-test.sh tests/dockerfile-test.sh \
+                   tests/entrypoint-test.sh; do
             echo "== $f"
             bash -n "$f"
           done
@@ -69,7 +70,7 @@ jobs:
                    multiplai-gh-token multiplai-docker.py \
                    tests/gateway-test.sh tests/multiplai-docker-test.sh \
                    tests/build-test.sh tests/git-hooks-test.sh \
-                   tests/dockerfile-test.sh; do
+                   tests/dockerfile-test.sh tests/entrypoint-test.sh; do
             test -x "$f" || { echo "$f is not executable"; exit 1; }
           done
 
@@ -87,7 +88,7 @@ jobs:
                      git-hooks/dispatch git-hooks/check-hookspath \
                      tests/git-hooks-test.sh tests/gateway-test.sh \
                      tests/multiplai-docker-test.sh tests/build-test.sh tests/harness.sh \
-                     tests/dockerfile-test.sh
+                     tests/dockerfile-test.sh tests/entrypoint-test.sh
 
   git-hooks-tests:
     name: git hook secret-gate harness
@@ -153,3 +154,14 @@ jobs:
       # that the in-build Playwright smoke check is still there to run.
       - name: tests/dockerfile-test.sh
         run: ./tests/dockerfile-test.sh
+
+  entrypoint-tests:
+    name: entrypoint pi/Codex update harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Stub curl and stub vendor installers, no network: the harness runs the
+      # real entrypoint against a temporary $HOME and kills it mid-install to
+      # check that each stopped state resumes like a run that never stopped.
+      - name: tests/entrypoint-test.sh
+        run: ./tests/entrypoint-test.sh
