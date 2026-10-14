@@ -42,9 +42,13 @@ sandboxed Claude Code container) and predates this changelog.
   their folder. A lock older than 30 minutes, left by a container killed
   mid-update, is removed and the refresh runs; a younger one means another
   container is updating, and this one uses the copy already there without
-  waiting. A failed install or update prints one `[entrypoint]` line naming
-  the copy still in use and never stops the container from starting; the
-  next start retries. `tests/entrypoint-test.sh` (new, run in CI) covers
+  waiting. A copy counts as installed only when it answers `--version`, so
+  a pi launcher left without its `current-version` file by a killed install
+  is installed again rather than put on `PATH`. The installer downloads have
+  a 10 s connect and 120 s total time limit, and a mounted folder uid 501
+  cannot write to is reported as such. A failed install or update prints
+  one `[entrypoint]` line naming the copy still in use and never stops the
+  container from starting; the next start retries. `tests/entrypoint-test.sh` (new, run in CI) covers
   each of these stop-and-resume cases against stub installers.
 
 ## [0.14] – 2026-10-11
