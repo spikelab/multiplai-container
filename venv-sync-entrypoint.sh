@@ -157,12 +157,22 @@ fi
 # its installer opens /dev/tty, which a `docker run -it` session has, and
 # waits at an interactive menu (pi.dev/install.sh, read 2026-10-14).
 #
+# A copy counts as installed only when it answers --version. pi's installer
+# writes its launcher before install/current-version, and a launcher without
+# that file exits 1 on every command, `pi update` included; a start killed
+# between the two writes is resumed by running the installer again.
+#
 # Nothing here may stop the container from starting. A failure prints one
 # [entrypoint] line naming the copy still in use, writes no stamp, and the
 # next start retries.
 CLI_INSTALLER_PATH="/usr/bin:/bin"
 CLI_LOCK_STALE_MINUTES=30
 CLI_LOCK_HELD=""
+
+# cli_runs <bin> — <bin> is there and answers --version.
+cli_runs() {
+    [ -x "$1" ] && "$1" --version >/dev/null 2>&1
+}
 
 # cli_version <command> — the version `<command> --version` reports, without
 # a program name in front (`codex-cli 0.159.2` → 0.159.2).
@@ -189,30 +199,45 @@ codex_install() {  # $1 = ~/.codex — installs, or updates an existing install
 }
 
 # refresh_cli <name> <dir> <bin> <install-fn> <update-fn> — install <bin> if
-# it is missing, update it if its stamp is older than the interval, under the
-# folder's lock. Never fails.
+# it is missing or does not run, update it if its stamp is older than the
+# interval, under the folder's lock. Returns 0 when <bin> is the copy to put
+# first on PATH, 1 when the baked copy should run instead.
 refresh_cli() {
     local name="$1" dir="$2" bin="$3" install_fn="$4" update_fn="$5"
     local days="${MULTIPLAI_CLI_UPDATE_DAYS:-7}"
     local stamp="$dir/.last-update" lock="$dir/.update-lock"
-    local verb fn copy
+    local verb fn
 
-    if [ -x "$bin" ]; then
-        if [ -f "$stamp" ] && find "$stamp" -mtime -"$days" 2>/dev/null | grep -q .; then
-            return 0
-        fi
+    # The stamp is written only after a refresh that left <bin> running.
+    if [ -x "$bin" ] && [ -f "$stamp" ] \
+            && find "$stamp" -mtime -"$days" 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    if cli_runs "$bin"; then
         verb=update; fn="$update_fn"
     else
         verb=install; fn="$install_fn"
+    fi
+
+    if [ ! -w "$dir" ]; then
+        if [ "$verb" = update ]; then
+            echo "[entrypoint] $dir is not writable — using installed $name $(cli_version "$bin")"
+            return 0
+        fi
+        echo "[entrypoint] $dir is not writable — using baked $name $(cli_version "$name")"
+        return 1
     fi
 
     if find "$lock" -maxdepth 0 -mmin +"$CLI_LOCK_STALE_MINUTES" 2>/dev/null | grep -q .; then
         rmdir "$lock" 2>/dev/null || true
     fi
     if ! mkdir "$lock" 2>/dev/null; then
-        if [ -x "$bin" ]; then copy="installed $name"; else copy="baked $name"; fi
-        echo "[entrypoint] $name $verb in progress elsewhere — using $copy"
-        return 0
+        if cli_runs "$bin"; then
+            echo "[entrypoint] $name $verb in progress elsewhere — using installed $name"
+            return 0
+        fi
+        echo "[entrypoint] $name $verb in progress elsewhere — using baked $name"
+        return 1
     fi
     CLI_LOCK_HELD="$lock"
     trap 'rmdir "$CLI_LOCK_HELD" 2>/dev/null || true' EXIT
@@ -222,32 +247,33 @@ refresh_cli() {
     else
         echo "[entrypoint] Updating $name (every ${days}d) ..."
     fi
-    if "$fn" "$dir" >/dev/null 2>&1 && [ -x "$bin" ]; then
+    local rc=0
+    if "$fn" "$dir" >/dev/null 2>&1 && cli_runs "$bin"; then
         date > "$stamp" 2>/dev/null || true
         echo "[entrypoint] $name: $(cli_version "$bin")"
-    elif [ -x "$bin" ]; then
+    elif cli_runs "$bin"; then
         echo "[entrypoint] $name $verb failed (offline?) — using installed $name $(cli_version "$bin")"
     else
         echo "[entrypoint] $name $verb failed (offline?) — using baked $name $(cli_version "$name")"
+        rc=1
     fi
 
     rmdir "$lock" 2>/dev/null || true
     trap - EXIT
     CLI_LOCK_HELD=""
+    return "$rc"
 }
 
 PI_CLI_DIR="$HOME/.pi-cli"
 if [ -d "$PI_CLI_DIR" ]; then
-    refresh_cli pi "$PI_CLI_DIR" "$PI_CLI_DIR/agent/bin/pi" pi_install pi_update
-    if [ -x "$PI_CLI_DIR/agent/bin/pi" ]; then
+    if refresh_cli pi "$PI_CLI_DIR" "$PI_CLI_DIR/agent/bin/pi" pi_install pi_update; then
         export PATH="$PI_CLI_DIR/agent/bin:$PATH"
     fi
 fi
 
 CODEX_DIR="$HOME/.codex"
 if [ -d "$CODEX_DIR" ]; then
-    refresh_cli codex "$CODEX_DIR" "$CODEX_DIR/bin/codex" codex_install codex_install
-    if [ -x "$CODEX_DIR/bin/codex" ]; then
+    if refresh_cli codex "$CODEX_DIR" "$CODEX_DIR/bin/codex" codex_install codex_install; then
         export PATH="$CODEX_DIR/bin:$PATH"
     fi
 fi
