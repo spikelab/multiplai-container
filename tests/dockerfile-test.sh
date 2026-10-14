@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# dockerfile-test.sh — static assertions over the Dockerfile's Playwright layer.
+# dockerfile-test.sh — static assertions over the Dockerfile's Playwright layer
+# and the pinned pi and Codex fallbacks.
 #
 # There is no daemon inside a Claude session container, so nothing here builds
 # the image; `release.sh` does that, and the in-build smoke check is what
@@ -82,5 +83,25 @@ if awk '{ i = index($0, "playwright install"); j = index($0, "chromium.launch(")
 else
     fail "the smoke check runs after the install"
 fi
+
+# --- pi and Codex: the baked fallbacks behind the entrypoint's weekly copies ---
+# The entrypoint keeps a self-updating copy of each in a mounted folder; these
+# baked copies are what a session runs when that folder is absent, the first
+# install failed, or another container holds the update lock. An unpinned
+# version here would make the fallback whatever was newest on build day.
+expect_line "PI_VERSION is a pinned ARG" \
+    '^ARG PI_VERSION=[0-9]+\.[0-9]+\.[0-9]+$'
+expect_line "CODEX_VERSION is a pinned ARG" \
+    '^ARG CODEX_VERSION=[0-9]+\.[0-9]+\.[0-9]+$'
+expect_line "the pi layer installs the pinned version with npm" \
+    '^RUN .*npm install -g .*@earendil-works/pi-coding-agent@\$\{PI_VERSION\}'
+expect_line "the Codex layer pins its release to CODEX_VERSION" \
+    '^RUN .*CODEX_RELEASE="?\$\{CODEX_VERSION\}'
+expect_line "the Codex layer installs non-interactively" \
+    '^RUN .*CODEX_NON_INTERACTIVE=1'
+expect_line "the Codex layer puts the binary in /usr/local/bin" \
+    '^RUN .*CODEX_INSTALL_DIR=/usr/local/bin'
+expect_line "the Codex layer keeps its releases in /opt/codex" \
+    '^RUN .*CODEX_HOME=/opt/codex'
 
 finish dockerfile-test
