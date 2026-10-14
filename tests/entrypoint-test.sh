@@ -639,6 +639,7 @@ echo "== a download that stalls"
 # baked copies well inside this harness's 15 s limit.
 H="$(new_home stall pi codex)"
 start=$SECONDS
+# shellcheck disable=SC2016  # expanded by the inner bash
 timeout -k 1 15 bash -c 'out="$1"; shift; "$@" bash "$0" bash -c "$PROBE" > "$out" 2>&1' \
     "$SRC" "$TMP/stall.out" env -i HOME="$H" PATH="$STUBS:$BAKED:/usr/bin:/bin" \
     STUB_DIR="$STUB_DIR" STUB_LOG="$STUB_LOG" PROBE="$PROBE" \

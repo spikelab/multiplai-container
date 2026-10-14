@@ -182,8 +182,15 @@ cli_version() {
     echo "${v:-unknown}"
 }
 
+# Fetching an installer gets its own time limits, so a network that drops
+# packets or stalls mid-transfer cannot hold up the start: curl has no total
+# limit by default. Both scripts are under 64 KiB (56 KB and 35 KB,
+# 2026-10-14), so they fit in the pipe and curl is done before sh runs the
+# slow part; the limit never cuts a script short.
+CLI_CURL_LIMITS=(--connect-timeout 10 --max-time 120)
+
 pi_install() {  # $1 = ~/.pi-cli
-    curl -fsSL https://pi.dev/install.sh \
+    curl -fsSL "${CLI_CURL_LIMITS[@]}" https://pi.dev/install.sh \
         | setsid -w env PATH="$1/agent/bin:$CLI_INSTALLER_PATH" PI_CODING_AGENT_DIR="$1/agent" sh
 }
 
@@ -193,7 +200,7 @@ pi_update() {  # $1 = ~/.pi-cli
 }
 
 codex_install() {  # $1 = ~/.codex — installs, or updates an existing install
-    curl -fsSL https://chatgpt.com/codex/install.sh \
+    curl -fsSL "${CLI_CURL_LIMITS[@]}" https://chatgpt.com/codex/install.sh \
         | env PATH="$1/bin:$CLI_INSTALLER_PATH" CODEX_HOME="$1" CODEX_INSTALL_DIR="$1/bin" \
               CODEX_NON_INTERACTIVE=1 sh
 }
