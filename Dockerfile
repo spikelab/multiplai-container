@@ -28,6 +28,14 @@ ARG GITLEAKS_SHA256_ARM64=4c811a7c23296c7163ebab166ec67cd8a31eb9922caf06a7cac4d6
 # the browser revision it was built against, so a mismatch makes it ask for a
 # revision this image does not have, and launch() fails until it downloads one.
 ARG PLAYWRIGHT_VERSION=1.63.0
+# pi and Codex are baked as fallbacks only: the entrypoint keeps a weekly
+# self-updating copy of each in a folder mounted from the Mac (~/.pi-cli,
+# ~/.codex) and puts it first on PATH. These pins are what runs before that
+# copy exists, or when its install failed.
+ARG PI_VERSION=1.2.0
+# Newest Codex release at least 14 days old when pinned: 0.159.2, released
+# 2026-09-29 (github.com/openai/codex, tag rust-v0.159.2).
+ARG CODEX_VERSION=0.159.2
 
 # --- All apt packages in one layer, single cache cleanup ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -105,6 +113,24 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
 RUN npm install -g vite@8.1.3 pnpm@11.26.0 ccusage@20.0.14 @usebruno/cli@3.5.1 \
         pyright@1.1.411 typescript-language-server@5.3.0 typescript@6.0.3 \
     && npm cache clean --force
+
+# pi — the baked fallback (see PI_VERSION above). It gets its own prefix,
+# exposed by one symlink in /usr/local/bin, because of pi's installer, which
+# the entrypoint runs to fill ~/.pi-cli: it refuses to install while a pi it
+# does not manage is on PATH, and offers instead to `npm uninstall -g` that
+# copy (verified against pi.dev/install.sh, 2026-10-14). At npm's default
+# /usr prefix this copy would sit in /usr/bin beside node and npm, which the
+# installer needs, so nothing could hide it. Here the entrypoint runs the
+# installer with PATH=/usr/bin:/bin, which leaves this copy out.
+# The version check runs as the session's uid, so a root-only file fails the
+# build here instead of in a session.
+RUN npm install -g --prefix /opt/pi "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+    && ln -s /opt/pi/bin/pi /usr/local/bin/pi \
+    && chmod -R a+rX /opt/pi \
+    && npm cache clean --force \
+    && HOME=/tmp PI_OFFLINE=1 setpriv --reuid=${HOST_UID} --regid=${HOST_GID} --clear-groups \
+       pi --version \
+    && rm -rf /root/.npm /tmp/* /tmp/.[!.]*
 
 # ast-grep gets its own prefix because @ast-grep/cli ships a second bin, `sg`,
 # which collides with /usr/bin/sg (the setgroup utility from the login
@@ -185,6 +211,29 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
     && { cp /root/.local/bin/claude /usr/local/bin/claude 2>/dev/null \
          || cp "$(find /root -name claude -type f -perm /111 2>/dev/null | head -1)" /usr/local/bin/claude; } \
     && rm -rf /root/.local /root/.npm /root/.cache /tmp/*
+
+# Codex CLI — the baked fallback (see CODEX_VERSION above), installed with
+# OpenAI's own installer pinned to that release. The installer unpacks the
+# release under CODEX_HOME=/opt/codex and links /usr/local/bin/codex to it.
+# `sh` gets no pipefail here, so a failed download would pass silently; the
+# version check after it is what fails the build. It runs as the session's
+# uid, so a root-only file fails the build here instead of in a session.
+#
+# Auto-update: there is no DISABLE_AUTOUPDATER-style variable to set for
+# Codex. Neither the installer nor the CLI reads an environment variable that
+# turns off its own updates (checked 2026-10-14: install.sh's variables, and
+# every CODEX_* name in the 0.159.2 binary). The only switch found is the
+# `check_for_update_on_startup` key in ~/.codex/config.toml, which lives in
+# the mounted folder, not in the image. The installer writes its
+# auto-update-version marker only for CODEX_RELEASE=latest, so this pinned
+# copy has none.
+RUN curl -fsSL https://chatgpt.com/codex/install.sh \
+        | CODEX_RELEASE="${CODEX_VERSION}" CODEX_NON_INTERACTIVE=1 \
+          CODEX_INSTALL_DIR=/usr/local/bin CODEX_HOME=/opt/codex sh \
+    && chmod -R a+rX /opt/codex \
+    && HOME=/tmp setpriv --reuid=${HOST_UID} --regid=${HOST_GID} --clear-groups \
+       codex --version \
+    && rm -rf /tmp/* /tmp/.[!.]*
 
 # gitleaks — secret scanner backing the container-wide git hooks below.
 # Release assets name the architecture x64/arm64, not amd64/arm64, so the dpkg
@@ -332,6 +381,7 @@ ENV MULTIPLAI_CONTAINER=1
 # so the updater targets the global npm prefix (/usr — root-owned here) and
 # every session nags "Auto-update failed: no write permission to npm prefix".
 ENV DISABLE_AUTOUPDATER=1
+# Codex has no equivalent variable; see the comment on its install step.
 
 WORKDIR ${WORKSPACE}
 
