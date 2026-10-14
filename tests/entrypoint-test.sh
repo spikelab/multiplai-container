@@ -22,8 +22,8 @@
 # then compares what the next start leaves behind — the files under $HOME,
 # PATH, and the printed [entrypoint] lines — with a run that never stopped.
 #
-# Requirements: bash, coreutils, findutils, setsid (util-linux). No docker,
-# no network.
+# Requirements: bash, coreutils, findutils, setsid (util-linux), Linux /proc.
+# No docker, no network.
 #
 # Usage:  ./tests/entrypoint-test.sh
 set -u
@@ -89,6 +89,17 @@ if [ "${STUB_HOLD:-0}" = 1 ] && [ "${STUB_HOLD_AT:-download}" = "$HOLD_POINT" ];
     echo $$ > "$STUB_DIR/hold.pid"
     n=0
     while [ ! -e "$STUB_DIR/release" ] && [ "$n" -lt 600 ]; do sleep 0.1; n=$((n+1)); done
+fi
+# With STUB_HANG=1 the stub hangs at the download instead, like a release
+# fetch on a network that stalls after the install script itself arrived. It
+# ignores TERM, and so does the child it waits on (an ignored signal stays
+# ignored across fork and exec). Both pids go to hang.pid: only a KILL sent to
+# the whole process group ends both.
+if [ "${STUB_HANG:-0}" = 1 ] && [ "$HOLD_POINT" = download ]; then
+    trap '' TERM
+    sleep 60 &
+    echo "$$ $!" > "$STUB_DIR/hang.pid"
+    wait
 fi
 EOF
 
@@ -635,8 +646,8 @@ expect_same "S9: resume after two stopped codex updates matches a clean update" 
 
 echo "== a download that stalls"
 # The container start must not wait on a network that never answers: the
-# entrypoint gives curl its own time limits, so the start fails over to the
-# baked copies well inside this harness's 15 s limit.
+# entrypoint gives the script fetch curl's own time limits, so the start fails
+# over to the baked copies well inside this harness's 15 s limit.
 H="$(new_home stall pi codex)"
 start=$SECONDS
 # shellcheck disable=SC2016  # expanded by the inner bash
@@ -651,6 +662,92 @@ expect_lines "a stalled download: one failure line per tool, naming the baked co
     "[entrypoint] pi install failed (offline?) — using baked pi 1.2.0" \
     "[entrypoint] Installing codex ..." \
     "[entrypoint] codex install failed (offline?) — using baked codex 0.159.2"
+
+echo "== an installer or pi update that hangs after the script arrives"
+# The script fetch has curl's limits, but what the installer downloads next,
+# and all of `pi update`, would wait forever on a stalled network. The
+# entrypoint runs each under one total time limit and then kills the whole
+# process tree. These cases run a copy of the entrypoint whose limit is cut to
+# 1 s, plus 1 s before the KILL, so they stay fast. Only the two numbers in the
+# CLI_RUN_LIMITS line change; every other option on it is kept, so the copy
+# behaves like the real file in all but time.
+EP_SHORT="$TMP/entrypoint-short-limit.sh"
+sed -E '/^CLI_RUN_LIMITS=\(/ { s/--kill-after=[0-9]+/--kill-after=1/; s/ [0-9]+\)$/ 1)/; }' \
+    "$SRC" > "$EP_SHORT"
+expect "the entrypoint names its installer time limit in one CLI_RUN_LIMITS line" \
+    test "$(diff "$SRC" "$EP_SHORT" | grep -c '^[<>]')" -eq 2
+
+# alive <pid> — the process exists and is not a zombie. A killed process whose
+# parent is gone stays a zombie until PID 1 reaps it, and kill -0 still
+# succeeds on a zombie.
+alive() {
+    local s
+    s="$(awk '/^State:/ { print $2 }' "/proc/$1/status" 2>/dev/null)"
+    [ -n "$s" ] && [ "$s" != Z ]
+}
+killed() {  # killed <pid…> — at least one pid, none of them alive
+    [ "$#" -gt 0 ] || return 1
+    local p
+    for p in "$@"; do ! alive "$p" || return 1; done
+}
+
+# hang_case <name> <home> <dir> <expected lines…> — one start whose installer
+# hangs, capped at 15 s by this harness.
+hang_case() {
+    local name="$1" h="$2" dir="$3" rc start pids=""; shift 3
+    rm -f "$STUB_DIR/hang.pid"
+    start=$SECONDS
+    timeout -k 1 15 env -i HOME="$h" PATH="$STUBS:$BAKED:/usr/bin:/bin" \
+        STUB_DIR="$STUB_DIR" STUB_LOG="$STUB_LOG" \
+        STUB_PI_LATEST=1.3.0 STUB_CODEX_LATEST=0.170.0 STUB_HANG=1 \
+        bash "$EP_SHORT" bash -c "$PROBE" > "$TMP/$name.out" 2>&1
+    rc=$?
+    expect "$name: the start finishes (rc=$rc, $((SECONDS - start))s)" test "$rc" -eq 0
+    expect_lines "$name: one failure line naming the copy in use" "$TMP/$name.out" "$@"
+    expect "$name: the lock is released" test ! -e "$dir/.update-lock"
+    read -r pids < "$STUB_DIR/hang.pid" 2>/dev/null
+    expect "$name: the installer reached the download" test -n "${pids:-}"
+    # shellcheck disable=SC2086  # two pids: the installer and its child
+    expect "$name: the installer and its child are killed" killed ${pids:-}
+    # shellcheck disable=SC2086
+    [ -n "${pids:-}" ] && kill -KILL $pids 2>/dev/null
+    rm -f "$STUB_DIR/hang.pid"
+}
+
+H="$(new_home hang-pi pi)"
+hang_case "pi install hangs" "$H" "$H/.pi-cli" \
+    "[entrypoint] Installing pi ..." \
+    "[entrypoint] pi install failed (offline?) — using baked pi 1.2.0"
+expect "pi install hangs: no stamp" test ! -e "$H/.pi-cli/.last-update"
+expect "pi install hangs: the baked pi runs" has_line "$TMP/pi install hangs.out" "pi=$BAKED/pi 1.2.0"
+run_ep "$TMP/hang-pi-next.out" "$H"
+expect_same "pi install hangs: the next start matches a clean install" \
+    "$H" "$TMP/hang-pi-next.out" "$TMP/BASE_PI_INSTALL"
+
+H="$(new_home hang-piu pi)"
+seed_old "$H" pi
+hang_case "pi update hangs" "$H" "$H/.pi-cli" \
+    "[entrypoint] Updating pi (every 7d) ..." \
+    "[entrypoint] pi update failed (offline?) — using installed pi 1.2.0"
+expect "pi update hangs: no new stamp" test -z "$(find "$H/.pi-cli/.last-update" -mtime -7)"
+expect "pi update hangs: the old release still runs" \
+    has_line "$TMP/pi update hangs.out" "pi=$H/.pi-cli/agent/bin/pi 1.2.0"
+run_ep "$TMP/hang-piu-next.out" "$H"
+expect_same "pi update hangs: the next start matches a clean update" \
+    "$H" "$TMP/hang-piu-next.out" "$TMP/BASE_PI_UPDATE"
+
+H="$(new_home hang-codex codex)"
+hang_case "codex install hangs" "$H" "$H/.codex" \
+    "[entrypoint] Installing codex ..." \
+    "[entrypoint] codex install failed (offline?) — using baked codex 0.159.2"
+expect "codex install hangs: no stamp" test ! -e "$H/.codex/.last-update"
+expect "codex install hangs: the baked codex runs" \
+    has_line "$TMP/codex install hangs.out" "codex=$BAKED/codex codex-cli 0.159.2"
+# The KILL leaves Codex's own lock behind, as in S5; it goes stale after 600 s.
+age 31 "$H/.codex/packages/standalone/install.lock.d"
+run_ep "$TMP/hang-codex-next.out" "$H"
+expect_same "codex install hangs: the next start matches a clean install" \
+    "$H" "$TMP/hang-codex-next.out" "$TMP/BASE_CODEX_INSTALL"
 
 echo "== a mounted folder that is not writable"
 # Docker creates a missing bind-mount source as root, so uid 501 cannot write
