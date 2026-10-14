@@ -16,6 +16,37 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Added
+
+- **pi in every session, updated weekly without a new image.** The image
+  bakes pi 1.2.0 (`ARG PI_VERSION`) as a fallback, npm-installed under its
+  own prefix `/opt/pi` and linked as `/usr/local/bin/pi`. When the launcher
+  mounts `~/.pi-cli`, the entrypoint installs pi there with pi's own
+  installer (`pi.dev/install.sh`, `PI_CODING_AGENT_DIR=~/.pi-cli/agent`),
+  runs `pi update` every `MULTIPLAI_CLI_UPDATE_DAYS` (default 7, shared with
+  Claude Code), and puts `~/.pi-cli/agent/bin` first on `PATH`. pi's config
+  stays in `~/.pi`. The baked copy is kept off npm's `/usr` prefix because
+  pi's installer refuses to install while a pi it does not manage is on
+  `PATH`; the entrypoint runs the installer with `PATH=/usr/bin:/bin` to hide
+  it. Without the mount, the baked copy runs and nothing is installed.
+- **Codex CLI in every session, updated weekly the same way.** The image
+  bakes Codex 0.159.2 (`ARG CODEX_VERSION`, the newest release at least 14
+  days old when pinned) with OpenAI's installer, at `/usr/local/bin/codex`
+  with its releases in `/opt/codex`. When the launcher mounts `~/.codex`
+  (which also holds the Codex login), the entrypoint re-runs that installer
+  into it every `MULTIPLAI_CLI_UPDATE_DAYS` and puts `~/.codex/bin` first on
+  `PATH`. Codex has no environment variable that turns off its own update
+  check, so there is no `DISABLE_AUTOUPDATER`-style setting for it.
+
+  Both refreshes use a `.last-update` stamp and a `.update-lock` directory in
+  their folder. A lock older than 30 minutes, left by a container killed
+  mid-update, is removed and the refresh runs; a younger one means another
+  container is updating, and this one uses the copy already there without
+  waiting. A failed install or update prints one `[entrypoint]` line naming
+  the copy still in use and never stops the container from starting; the
+  next start retries. `tests/entrypoint-test.sh` (new, run in CI) covers
+  each of these stop-and-resume cases against stub installers.
+
 ## [0.14] – 2026-10-11
 
 ### Added
