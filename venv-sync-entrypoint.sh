@@ -182,26 +182,49 @@ cli_version() {
     echo "${v:-unknown}"
 }
 
-# Fetching an installer gets its own time limits, so a network that drops
+# Fetching an install script gets its own time limits, so a network that drops
 # packets or stalls mid-transfer cannot hold up the start: curl has no total
 # limit by default. Both scripts are under 64 KiB (56 KB and 35 KB,
 # 2026-10-14), so they fit in the pipe and curl is done before sh runs the
 # slow part; the limit never cuts a script short.
 CLI_CURL_LIMITS=(--connect-timeout 10 --max-time 120)
 
+# These limits cover only the script. What the installer then downloads (pi's
+# release and its npm dependencies, Codex's release archive), and all of
+# `pi update`, is bounded by GNU timeout around the whole run: TERM after
+# 600 s, KILL 10 s later for anything still running. 600 s is longer than
+# Codex's own limits on its release downloads (30 s for the release list,
+# 300 s for the archive; chatgpt.com/codex/install.sh, read 2026-10-14), so a
+# download those limits would let finish is not cut short; its fallback
+# fetch from GitHub has no limit of its own, and this is that limit. And
+# 610 s is a third of the 30-minute rule above, so the lock of a refresh
+# that is still running can never be taken for one a killed container left.
+# A refresh stopped this way takes the ordinary failure path below.
+#
+# timeout runs without --foreground so that it signals its whole process
+# group, not just its direct child: the processes the installer starts
+# (curl, tar, npm) die with it. That group is the setsid session for pi; for Codex,
+# timeout makes one of its own. Codex's installer is non-interactive here and
+# never reads the terminal, so running it outside the terminal's foreground
+# group cannot stop it.
+CLI_RUN_LIMITS=(--kill-after=10 600)
+
 pi_install() {  # $1 = ~/.pi-cli
     curl -fsSL "${CLI_CURL_LIMITS[@]}" https://pi.dev/install.sh \
-        | setsid -w env PATH="$1/agent/bin:$CLI_INSTALLER_PATH" PI_CODING_AGENT_DIR="$1/agent" sh
+        | setsid -w timeout "${CLI_RUN_LIMITS[@]}" \
+              env PATH="$1/agent/bin:$CLI_INSTALLER_PATH" PI_CODING_AGENT_DIR="$1/agent" sh
 }
 
 pi_update() {  # $1 = ~/.pi-cli
-    setsid -w env PATH="$1/agent/bin:$CLI_INSTALLER_PATH" PI_CODING_AGENT_DIR="$1/agent" \
+    setsid -w timeout "${CLI_RUN_LIMITS[@]}" \
+        env PATH="$1/agent/bin:$CLI_INSTALLER_PATH" PI_CODING_AGENT_DIR="$1/agent" \
         "$1/agent/bin/pi" update </dev/null
 }
 
 codex_install() {  # $1 = ~/.codex — installs, or updates an existing install
     curl -fsSL "${CLI_CURL_LIMITS[@]}" https://chatgpt.com/codex/install.sh \
-        | env PATH="$1/bin:$CLI_INSTALLER_PATH" CODEX_HOME="$1" CODEX_INSTALL_DIR="$1/bin" \
+        | timeout "${CLI_RUN_LIMITS[@]}" \
+              env PATH="$1/bin:$CLI_INSTALLER_PATH" CODEX_HOME="$1" CODEX_INSTALL_DIR="$1/bin" \
               CODEX_NON_INTERACTIVE=1 sh
 }
 
