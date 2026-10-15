@@ -16,6 +16,8 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+## [0.15] – 2026-10-15
+
 ### Added
 
 - **pi in every session, updated weekly without a new image.** The image
@@ -53,6 +55,8 @@ sandboxed Claude Code container) and predates this changelog.
   one `[entrypoint]` line naming the copy still in use and never stops the
   container from starting; the next start retries. `tests/entrypoint-test.sh` (new, run in CI) covers
   each of these stop-and-resume cases against stub installers.
+
+[0.15]: https://github.com/spikelab/multiplai-container/compare/v0.14...v0.15
 
 ## [0.14] – 2026-10-11
 
