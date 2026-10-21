@@ -16,6 +16,16 @@ sandboxed Claude Code container) and predates this changelog.
 
 ## [Unreleased]
 
+### Changed
+
+- **`multiplai-docker.py` is linted and formatted with ruff 0.17.1.**
+  `ruff.toml` pins the version and uses ruff's default rules with
+  `target-version = "py39"`, so pyupgrade never suggests syntax newer than the
+  host's Python. The file is reformatted by `ruff format`; its behaviour is
+  unchanged. Its existing `%`-formatting (UP031) is ignored for that file
+  only, and CI runs `ruff check` and `ruff format --check` on every push and
+  PR. `.git-blame-ignore-revs` skips the reformat commit in `git blame`.
+
 ## [0.15] – 2026-10-15
 
 ### Added
