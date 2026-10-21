@@ -7,3 +7,7 @@ required-version = "==0.17.1"
 # py39 stops pyupgrade from suggesting syntax the host might not run.
 target-version = "py39"
 extend-exclude = []
+
+# Violations present when ruff was adopted (2026-10). Remove an entry by fixing it; never add one for new code.
+[lint.per-file-ignores]
+"multiplai-docker.py" = ["UP031"]
