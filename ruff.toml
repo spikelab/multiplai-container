@@ -1,0 +1,9 @@
+# ruff 0.17.1 with its default rule set: no select/extend-select, no
+# line-length (88 default). Pinned because the default set changes between
+# minor versions.
+required-version = "==0.17.1"
+# multiplai-docker.py runs on the Mac host under /usr/bin/env python3, which on
+# a stock macOS is Apple's Python 3.9 (recalled, not verified on the host).
+# py39 stops pyupgrade from suggesting syntax the host might not run.
+target-version = "py39"
+extend-exclude = []
