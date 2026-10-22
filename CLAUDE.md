@@ -146,6 +146,15 @@ tail, guarded guest argv. Invariants to preserve:
   contract, and `tests/multiplai-docker-test.sh` plus `tests/gateway-test.sh`
   cover the two halves. Both mutate-check cleanly; keep it that way.
 
+Lint and format it with ruff 0.17.1 (pinned in `ruff.toml`, default rules, CI
+runs both). Both must exit 0, beside `python3 -m py_compile multiplai-docker.py`
+and the harness:
+
+```bash
+uvx ruff@0.17.1 check .
+uvx ruff@0.17.1 format --check .
+```
+
 Full design and host setup: [docs/multiplai-docker.md](docs/multiplai-docker.md).
 
 ## Editing the secret gate (`git-hooks/`)

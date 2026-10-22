@@ -605,10 +605,7 @@ def cmd_freeze(args: list[str]) -> int:
             svc["x-multiplai-ports"] = targets
         labels = svc.get("labels")
         if isinstance(labels, list):
-            labels = {
-                k: v
-                for k, _, v in (item.partition("=") for item in labels)
-            }
+            labels = {k: v for k, _, v in (item.partition("=") for item in labels)}
         elif not isinstance(labels, dict):
             labels = {}
         labels["multiplai.profile"] = name
@@ -650,7 +647,9 @@ def cmd_freeze(args: list[str]) -> int:
     print("  services: %s" % " ".join(sorted(services)))
     outside = _paths_outside_bind_root(services, bind_root)
     if outside:
-        print("  NOTE: %d path(s) fall outside BIND_ROOT (%s)" % (len(outside), bind_root))
+        print(
+            "  NOTE: %d path(s) fall outside BIND_ROOT (%s)" % (len(outside), bind_root)
+        )
         for item in outside:
             print("    %s" % item)
         print(
@@ -795,9 +794,7 @@ def cmd_bridge(verb: str, args: list[str]) -> int:
                 tail = min(int(raw), MAX_TAIL)
             reject_extra(args, "logs takes at most <service> <n>")
             # Never --follow: the bridge call would never return.
-            return run_rc(
-                base + ["logs", "--no-color", "--tail", str(tail), svc]
-            )
+            return run_rc(base + ["logs", "--no-color", "--tail", str(tail), svc])
 
         if verb in ("restart", "build"):
             # One body: both take exactly <service>. The Compose subcommand is
@@ -924,9 +921,7 @@ def cmd_reap(args: list[str]) -> int:
             rc = rc or 1
             continue
         print("reaping %s (instance %s, created %s)" % (project, instance, created))
-        code = run_rc(
-            compose_base(conf, conf["FROZEN"], project) + ["down", "-v"]
-        )
+        code = run_rc(compose_base(conf, conf["FROZEN"], project) + ["down", "-v"])
         rc = rc or code
     return rc
 
